@@ -72,7 +72,7 @@ interface AnalysisResultProps {
   }
 }
 
-// --- Helper: Searchable Input for Locations ---
+// --- Helper: Searchable Input ---
 function LocationAutocomplete({ value, onChange, options, placeholder }: { value: string, onChange: (val: string) => void, options: string[], placeholder: string }) {
   const [isOpen, setIsOpen] = useState(false);
   const [isFocused, setIsFocused] = useState(false);
@@ -112,7 +112,6 @@ function LocationAutocomplete({ value, onChange, options, placeholder }: { value
 export function AnalysisResults({ data }: AnalysisResultProps) {
   const [searchTerm, setSearchTerm] = useState("")
   const [filterType, setFilterType] = useState<"all" | "violation" | "warning" | "matched" | "unmatched">("all")
-  
   const [isReportDialogOpen, setIsReportDialogOpen] = useState(false)
   
   const [reportDetails, setReportDetails] = useState({
@@ -241,19 +240,18 @@ export function AnalysisResults({ data }: AnalysisResultProps) {
     } else {
         autoTable(doc, {
             startY: yPos,
-            head: [["Type", "Start Spd", "Low Spd", "Drop", "Status", "Loc", "Time"]],
+            // Format: Speed Drop Arrow
+            head: [["Type", "Speed Drop (Start -> End)", "Status", "Loc", "Time"]],
             body: data.summary.brake_tests.map(t => [
                 t.type, 
-                `${t.startSpeed} km/h`, 
-                `${t.lowestSpeed} km/h`, 
-                `${t.dropAmount} km/h`,
+                `${t.startSpeed} → ${t.lowestSpeed} km/h`, 
                 t.status.toUpperCase().replace('_', ' '),
                 t.location,
                 t.timestamp?.split(' ')[1]
             ]),
             theme: 'grid', headStyles: { fillColor: [71, 85, 105] }, styles: { fontSize: 9 },
             didParseCell: function(data) {
-                if(data.column.index === 4 && data.section === 'body') {
+                if(data.column.index === 2 && data.section === 'body') {
                     const status = data.cell.raw as string;
                     if(status.includes('PROPER')) data.cell.styles.textColor = [22, 163, 74];
                     else if(status.includes('NOT')) data.cell.styles.textColor = [100, 116, 139];
@@ -417,13 +415,21 @@ export function AnalysisResults({ data }: AnalysisResultProps) {
                     <Card key={i} className={`border-l-4 ${test.status === 'proper' ? 'border-l-green-500' : test.status === 'not_performed' ? 'border-l-gray-400' : 'border-l-red-500'}`}>
                         <CardHeader><CardTitle>{test.type === 'BFT' ? 'Brake Feel Test (BFT)' : 'Brake Power Test (BPT)'}</CardTitle></CardHeader>
                         <CardContent className="space-y-2 text-sm">
-                            <div className="flex justify-between"><span>Status:</span><span className={`font-bold uppercase ${test.status === 'proper' ? 'text-green-600' : test.status === 'not_performed' ? 'text-gray-500' : 'text-red-600'}`}>{test.status.replace('_', ' ')}</span></div>
-                            <div className="flex justify-between"><span>Start Speed:</span><span>{test.startSpeed} km/h</span></div>
-                            <div className="flex justify-between"><span>Lowest Speed:</span><span>{test.lowestSpeed} km/h</span></div>
-                            <div className="flex justify-between"><span>Drop Achieved:</span><span>{test.dropAmount} km/h</span></div>
-                            <div className="flex justify-between"><span>Location:</span><span>{test.location}</span></div>
-                            <div className="flex justify-between"><span>Time:</span><span>{test.timestamp?.split(' ')[1]}</span></div>
-                            {test.details && <div className="text-xs text-muted-foreground mt-2 border-t pt-2">{test.details}</div>}
+                            <div className="flex justify-between items-center border-b pb-2"><span>Status:</span><span className={`font-bold uppercase ${test.status === 'proper' ? 'text-green-600' : test.status === 'not_performed' ? 'text-gray-500' : 'text-red-600'}`}>{test.status.replace('_', ' ')}</span></div>
+                            
+                            {/* UPDATED: Format as per 3rd Pic Requirement */}
+                            <div className="grid grid-cols-2 gap-4 py-2">
+                                <div><p className="text-xs text-muted-foreground">Start Speed</p><p className="font-medium">{test.startSpeed} km/h</p></div>
+                                <div><p className="text-xs text-muted-foreground">End Speed</p><p className="font-medium">{test.lowestSpeed} km/h</p></div>
+                            </div>
+                            
+                            <div className="flex justify-between items-center bg-muted/50 p-2 rounded">
+                                <span className="text-xs font-semibold">Speed Drop Achieved:</span>
+                                <span className="font-bold text-base">{test.startSpeed} → {test.lowestSpeed}</span>
+                            </div>
+
+                            <div className="flex justify-between text-xs pt-2"><span>Location: {test.location}</span><span>Time: {test.timestamp?.split(' ')[1]}</span></div>
+                            {test.details && <div className="text-xs text-muted-foreground mt-2 border-t pt-2 italic">{test.details}</div>}
                         </CardContent>
                     </Card>
                 ))}

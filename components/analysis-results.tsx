@@ -7,14 +7,14 @@ import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
 import { MapContainer } from "@/components/map-container"
 import { SpeedChart } from "@/components/speed-chart"
-import {
+import { 
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogDescription
 } from "@/components/ui/dialog"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { 
-    Activity, MapPin, TrendingUp, Download, FileText, AlertTriangle, 
-    Search, ChevronDown, FileWarning, Image as ImageIcon, X, 
-    Clock, AlertOctagon, ClipboardList 
+import {  
+    Activity, MapPin, TrendingUp, Download, FileText, AlertTriangle,  
+    Search, ChevronDown, FileWarning, Image as ImageIcon, X,  
+    Clock, AlertOctagon, ClipboardList  
 } from "lucide-react"
 
 import jsPDF from "jspdf"
@@ -104,22 +104,26 @@ interface AnalysisResultsProps {
 export function AnalysisResults({ data }: AnalysisResultsProps) {
   const [searchTerm, setSearchTerm] = useState("")
   const [filterType, setFilterType] = useState<"all" | "violation" | "warning" | "matched" | "unmatched">("all")
-  
+   
   const [isReportDialogOpen, setIsReportDialogOpen] = useState(false)
   const [reportDetails, setReportDetails] = useState({
     trainNo: "", locoNo: "", lpName: "", alpName: "", cliName: "", section: "", 
-    mps: data.summary.config_mps ? `${data.summary.config_mps} km/h` : "", 
+    mps: data?.summary?.config_mps ? `${data.summary.config_mps} km/h` : "", 
     fromLoc: "", toLoc: "", globalRemarks: ""
   })
   const [signatureImg, setSignatureImg] = useState<string | null>(null)
 
   // Merge & Sort
   const combinedData = useMemo(() => {
-    const all = [...data.results, ...data.signals];
+    // Safety checks: ensure results and signals are arrays
+    const results = Array.isArray(data?.results) ? data.results : [];
+    const signals = Array.isArray(data?.signals) ? data.signals : [];
+    
+    const all = [...results, ...signals];
     return all.sort((a, b) => (a.logging_time && b.logging_time) ? new Date(a.logging_time).getTime() - new Date(b.logging_time).getTime() : 0);
-  }, [data.results, data.signals]);
+  }, [data]);
 
-  const locOptions = useMemo(() => Array.from(new Set(combinedData.map(r => r.location))).sort(), [combinedData]);
+  const locOptions = useMemo(() => Array.from(new Set(combinedData.map(r => r.location))).filter(Boolean).sort(), [combinedData]);
 
   const filteredResults = useMemo(() => {
     return combinedData.filter((item) => {
@@ -205,9 +209,9 @@ export function AnalysisResults({ data }: AnalysisResultsProps) {
     doc.setFontSize(12); doc.setTextColor(0); doc.text("1. Brake Test Results", 14, yPos + 10);
     yPos += 14;
     
-    if (data.summary.brake_tests.length === 0) {
+    if (data.summary?.brake_tests?.length === 0) {
         doc.setFontSize(10); doc.setTextColor(100); doc.text("No Brake Tests recorded.", 14, yPos); yPos += 10;
-    } else {
+    } else if (data.summary?.brake_tests) {
         autoTable(doc, {
             startY: yPos,
             head: [["Test Type", "Status", "Test Speed", "Final Speed", "Location", "Time"]],
@@ -229,7 +233,7 @@ export function AnalysisResults({ data }: AnalysisResultsProps) {
     doc.setFontSize(12); doc.setTextColor(0); doc.text("2. Stoppages & Halt Violations", 14, yPos);
     yPos += 4;
     
-    if (data.summary.stoppages.length > 0) {
+    if (data.summary?.stoppages?.length > 0) {
         autoTable(doc, {
             startY: yPos,
             head: [["Location", "Arrival", "Departure", "Duration"]],
@@ -244,7 +248,7 @@ export function AnalysisResults({ data }: AnalysisResultsProps) {
     }
 
     // Approach Violations
-    if (data.summary.halt_approach_violations.length > 0) {
+    if (data.summary?.halt_approach_violations?.length > 0) {
         doc.setFontSize(10); doc.setTextColor(220, 38, 38); doc.text("Approach Speed Violations detected:", 14, yPos);
         yPos += 4;
         autoTable(doc, {
@@ -276,36 +280,48 @@ export function AnalysisResults({ data }: AnalysisResultsProps) {
         };
         
         const groups: Group[] = [];
-        let current: Group = {
-            from: violations[0].location, to: violations[0].location, limit: violations[0].limit_applied, maxSpeed: Math.round(violations[0].speed_kmph),
-            startTime: violations[0].logging_time, endTime: violations[0].logging_time, lastLat: violations[0].latitude, lastLon: violations[0].longitude
-        };
+        
+        // Ensure we have at least one violation before initializing
+        if (violations.length > 0) {
+            let current: Group = {
+                from: violations[0].location, to: violations[0].location, limit: violations[0].limit_applied, maxSpeed: Math.round(violations[0].speed_kmph),
+                startTime: violations[0].logging_time, endTime: violations[0].logging_time, lastLat: Number(violations[0].latitude), lastLon: Number(violations[0].longitude)
+            };
 
-        for (let i = 1; i < violations.length; i++) {
-            const row = violations[i]; const rowSpeed = Math.round(row.speed_kmph);
-            const dist = getDist(current.lastLat, current.lastLon, row.latitude, row.longitude);
-            if (row.limit_applied === current.limit && dist < 100) {
-                current.to = row.location; current.maxSpeed = Math.max(current.maxSpeed, rowSpeed);
-                current.lastLat = row.latitude; current.lastLon = row.longitude;
-            } else {
-                groups.push(current);
-                current = { from: row.location, to: row.location, limit: row.limit_applied, maxSpeed: rowSpeed, startTime: row.logging_time, endTime: row.logging_time, lastLat: row.latitude, lastLon: row.longitude };
+            for (let i = 1; i < violations.length; i++) {
+                const row = violations[i]; const rowSpeed = Math.round(row.speed_kmph);
+                // Ensure coordinates are numbers
+                const rowLat = Number(row.latitude);
+                const rowLon = Number(row.longitude);
+                
+                const dist = getDist(current.lastLat, current.lastLon, rowLat, rowLon);
+                if (row.limit_applied === current.limit && dist < 100) {
+                    current.to = row.location; current.maxSpeed = Math.max(current.maxSpeed, rowSpeed);
+                    current.lastLat = rowLat; current.lastLon = rowLon;
+                } else {
+                    groups.push(current);
+                    current = { from: row.location, to: row.location, limit: row.limit_applied, maxSpeed: rowSpeed, startTime: row.logging_time, endTime: row.logging_time, lastLat: rowLat, lastLon: rowLon };
+                }
             }
-        }
-        groups.push(current);
+            groups.push(current);
 
-        autoTable(doc, {
-            startY: yPos,
-            head: [["From", "To", "Time", "Limit", "Max Speed", "Signature", "Remarks"]],
-            body: groups.map(g => [ g.from, g.to, g.startTime ? g.startTime.split(' ')[1] : "-", `${g.limit}`, `${g.maxSpeed}`, "", "" ]),
-            theme: 'grid', headStyles: { fillColor: [220, 38, 38] },
-            columnStyles: { 5: { minCellHeight: 15, cellWidth: 30 }, 6: { cellWidth: 40 } },
-            didDrawCell: function(data) { if (data.column.index === 5 && data.section === 'body' && signatureImg) doc.addImage(signatureImg, 'PNG', data.cell.x + 2, data.cell.y + 2, 25, 10); }
-        });
+            autoTable(doc, {
+                startY: yPos,
+                head: [["From", "To", "Time", "Limit", "Max Speed", "Signature", "Remarks"]],
+                body: groups.map(g => [ g.from, g.to, g.startTime ? g.startTime.split(' ')[1] : "-", `${g.limit}`, `${g.maxSpeed}`, "", "" ]),
+                theme: 'grid', headStyles: { fillColor: [220, 38, 38] },
+                columnStyles: { 5: { minCellHeight: 15, cellWidth: 30 }, 6: { cellWidth: 40 } },
+                didDrawCell: function(data) { if (data.column.index === 5 && data.section === 'body' && signatureImg) doc.addImage(signatureImg, 'PNG', data.cell.x + 2, data.cell.y + 2, 25, 10); }
+            });
+        }
     }
 
     doc.save("report_summary.pdf");
     setIsReportDialogOpen(false);
+  }
+
+  if (!data || !data.summary) {
+      return <div>Loading Analysis Data...</div>
   }
 
   // --- RENDER ---
@@ -322,11 +338,16 @@ export function AnalysisResults({ data }: AnalysisResultsProps) {
         <TabsContent value="dashboard" className="space-y-6 mt-4">
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
                 <Card className="p-4 flex items-center gap-3"><div className="bg-primary/10 p-2 rounded"><MapPin className="h-5 w-5 text-primary"/></div><div><p className="text-xs text-muted-foreground">Total Assets</p><p className="text-2xl font-bold">{combinedData.length}</p></div></Card>
-                <Card className="p-4 flex items-center gap-3"><div className="bg-destructive/10 p-2 rounded"><AlertTriangle className="h-5 w-5 text-destructive"/></div><div><p className="text-xs text-muted-foreground">Violations</p><p className="text-2xl font-bold text-destructive">{data.summary.violation_count}</p></div></Card>
-                <Card className="p-4 flex items-center gap-3"><div className="bg-orange-100 p-2 rounded"><AlertTriangle className="h-5 w-5 text-orange-600"/></div><div><p className="text-xs text-muted-foreground">Warnings</p><p className="text-2xl font-bold text-orange-600">{data.summary.warning_count}</p></div></Card>
-                <Card className="p-4 flex items-center gap-3"><div className="bg-chart-4/10 p-2 rounded"><Activity className="h-5 w-5 text-chart-4"/></div><div><p className="text-xs text-muted-foreground">Match Rate</p><p className="text-2xl font-bold">{data.summary.match_rate.toFixed(1)}%</p></div></Card>
+                <Card className="p-4 flex items-center gap-3"><div className="bg-destructive/10 p-2 rounded"><AlertTriangle className="h-5 w-5 text-destructive"/></div><div><p className="text-xs text-muted-foreground">Violations</p><p className="text-2xl font-bold text-destructive">{data.summary?.violation_count || 0}</p></div></Card>
+                <Card className="p-4 flex items-center gap-3"><div className="bg-orange-100 p-2 rounded"><AlertTriangle className="h-5 w-5 text-orange-600"/></div><div><p className="text-xs text-muted-foreground">Warnings</p><p className="text-2xl font-bold text-orange-600">{data.summary?.warning_count || 0}</p></div></Card>
+                <Card className="p-4 flex items-center gap-3"><div className="bg-chart-4/10 p-2 rounded"><Activity className="h-5 w-5 text-chart-4"/></div><div><p className="text-xs text-muted-foreground">Match Rate</p><p className="text-2xl font-bold">{data.summary?.match_rate ? data.summary.match_rate.toFixed(1) : 0}%</p></div></Card>
             </div>
-            <Card className="overflow-hidden p-0"><MapContainer data={data.results} signals={data.signals} /></Card>
+            
+            <Card className="overflow-hidden p-0">
+                {/* Passed with safe defaults */}
+                <MapContainer data={data.results || []} signals={data.signals || []} />
+            </Card>
+
             <Card className="p-6">
                 <div className="mb-4 flex flex-col md:flex-row justify-between gap-4">
                     <h3 className="text-lg font-semibold">Detailed Data</h3>
@@ -356,13 +377,13 @@ export function AnalysisResults({ data }: AnalysisResultsProps) {
         </TabsContent>
 
         <TabsContent value="graph" className="mt-4">
-            <SpeedChart data={combinedData} mps={data.summary.config_mps} />
+            <SpeedChart data={combinedData} mps={data.summary?.config_mps || 100} />
         </TabsContent>
 
         <TabsContent value="braketests" className="mt-4 space-y-6">
             <div className="grid gap-6 md:grid-cols-2">
-                {data.summary.brake_tests.length === 0 && <p className="text-muted-foreground col-span-2 text-center py-8">No Brake Tests Detected (Ensure data covers start of journey)</p>}
-                {data.summary.brake_tests.map((test, i) => (
+                {(!data.summary?.brake_tests || data.summary.brake_tests.length === 0) && <p className="text-muted-foreground col-span-2 text-center py-8">No Brake Tests Detected (Ensure data covers start of journey)</p>}
+                {data.summary?.brake_tests?.map((test, i) => (
                     <Card key={i} className={`border-l-4 ${test.status === 'proper' ? 'border-l-green-500' : 'border-l-red-500'}`}>
                         <CardHeader><CardTitle>{test.type === 'BFT' ? 'Brake Feel Test (BFT)' : 'Brake Power Test (BPT)'}</CardTitle></CardHeader>
                         <CardContent className="space-y-2">
@@ -379,13 +400,13 @@ export function AnalysisResults({ data }: AnalysisResultsProps) {
 
         <TabsContent value="stoppages" className="mt-4 space-y-6">
             <Card>
-                <CardHeader><CardTitle className="flex items-center gap-2"><Clock className="h-5 w-5"/> Detected Stoppages ({data.summary.stoppages.length})</CardTitle></CardHeader>
+                <CardHeader><CardTitle className="flex items-center gap-2"><Clock className="h-5 w-5"/> Detected Stoppages ({data.summary?.stoppages?.length || 0})</CardTitle></CardHeader>
                 <CardContent>
                     <div className="rounded-md border overflow-hidden">
                         <table className="w-full text-sm">
                             <thead className="bg-muted"><tr className="border-b"><th className="p-3 text-left">Arrival</th><th className="p-3 text-left">Departure</th><th className="p-3 text-left">Duration</th><th className="p-3 text-left">Location</th></tr></thead>
                             <tbody>
-                                {data.summary.stoppages.map((s, i) => (
+                                {data.summary?.stoppages?.map((s, i) => (
                                     <tr key={i} className="border-b"><td className="p-3">{s.arrivalTime.split(' ')[1]}</td><td className="p-3">{s.departureTime.split(' ')[1]}</td><td className="p-3">{s.durationMin} min</td><td className="p-3">{s.location}</td></tr>
                                 ))}
                             </tbody>
@@ -397,7 +418,7 @@ export function AnalysisResults({ data }: AnalysisResultsProps) {
             <Card className="border-red-200">
                 <CardHeader><CardTitle className="flex items-center gap-2 text-destructive"><AlertOctagon className="h-5 w-5"/> Approach Speed Violations</CardTitle></CardHeader>
                 <CardContent>
-                    {data.summary.halt_approach_violations.length === 0 ? <p className="text-muted-foreground text-sm">No approach violations detected.</p> : (
+                    {(!data.summary?.halt_approach_violations || data.summary.halt_approach_violations.length === 0) ? <p className="text-muted-foreground text-sm">No approach violations detected.</p> : (
                         <div className="rounded-md border overflow-hidden">
                             <table className="w-full text-sm">
                                 <thead className="bg-red-50"><tr className="border-b"><th className="p-3 text-left">Halt Loc</th><th className="p-3 text-left">Checkpoint</th><th className="p-3 text-left">Limit</th><th className="p-3 text-left">Actual</th><th className="p-3 text-left">Time</th></tr></thead>
@@ -423,18 +444,4 @@ export function AnalysisResults({ data }: AnalysisResultsProps) {
              <div className="grid grid-cols-2 gap-4"><div className="space-y-2"><Label>CLI Name</Label><Input value={reportDetails.cliName} onChange={e => setReportDetails({...reportDetails, cliName: e.target.value})} /></div><div className="space-y-2"><Label>Section</Label><Input value={reportDetails.section} onChange={e => setReportDetails({...reportDetails, section: e.target.value})} /></div></div>
              <div className="space-y-2"><Label>MPS</Label><Input value={reportDetails.mps} onChange={e => setReportDetails({...reportDetails, mps: e.target.value})} /></div>
              <div className="space-y-2"><Label>Remarks</Label><Input value={reportDetails.globalRemarks} onChange={e => setReportDetails({...reportDetails, globalRemarks: e.target.value})} /></div>
-             <div className="space-y-2"><Label>Signature (Image)</Label><div className="flex gap-2 items-center"><Input type="file" accept="image/*" onChange={handleSignatureUpload} className="w-full" />{signatureImg && <Button variant="ghost" size="icon" onClick={() => setSignatureImg(null)}><X className="h-4 w-4" /></Button>}</div>{signatureImg && <p className="text-xs text-green-600 flex items-center gap-1"><ImageIcon className="h-3 w-3"/> Signature Loaded</p>}</div>
-             <div className="grid grid-cols-2 gap-4 pt-4 border-t"><div className="space-y-2"><Label>From</Label><LocationAutocomplete value={reportDetails.fromLoc} onChange={v => setReportDetails({...reportDetails, fromLoc: v})} options={locOptions} placeholder="Start..." /></div><div className="space-y-2"><Label>To</Label><LocationAutocomplete value={reportDetails.toLoc} onChange={v => setReportDetails({...reportDetails, toLoc: v})} options={locOptions} placeholder="End..." /></div></div>
-          </div>
-          <DialogFooter className="sm:justify-between">
-            <Button variant="ghost" onClick={() => setIsReportDialogOpen(false)}>Cancel</Button>
-            <div className="flex gap-2">
-                <Button variant="secondary" onClick={handleDownloadSummaryReport} className="gap-2"><ClipboardList className="h-4 w-4" /> Report Summary</Button>
-                <Button onClick={handleDownloadFullReport} className="gap-2"><FileText className="h-4 w-4" /> Full Report</Button>
-            </div>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-    </div>
-  )
-}
+             <div className="space-y-2"><Label>Signature (Image)</Label><div className="flex gap-2 items-center

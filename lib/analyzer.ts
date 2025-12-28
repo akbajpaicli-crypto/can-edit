@@ -190,24 +190,20 @@ function preprocessCautionOrders(
     }
 
     // 2. Determine Direction (Are we moving down or up the list?)
-    // Direction = 1 means we move to higher indices; -1 means lower indices
     const direction = endIdx > startIdx ? 1 : -1;
     
     // 3. "Walk" the train length starting from the End point
     let currentIdx = endIdx;
     let distanceCovered = 0;
-
-    // Safety limit to prevent infinite loops (max 100 masts check ~ 6km)
     let steps = 0;
+
     while (distanceCovered < trainLength && steps < 100) {
       const nextIdx = currentIdx + direction;
-
       // Stop if we hit the file boundary
       if (nextIdx < 0 || nextIdx >= masterData.length) break;
 
       const p1 = masterData[currentIdx];
       const p2 = masterData[nextIdx];
-
       const lat1 = cleanCoord(p1[latCol]);
       const lon1 = cleanCoord(p1[lonCol]);
       const lat2 = cleanCoord(p2[latCol]);
@@ -215,8 +211,7 @@ function preprocessCautionOrders(
 
       if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
         const d = getDistance(lat1, lon1, lat2, lon2);
-        // Sanity check: if distance between masts > 200m, likely data gap, stop here
-        if (d < 200) distanceCovered += d;
+        if (d < 200) distanceCovered += d; // Sanity check for data gaps
       }
       
       currentIdx = nextIdx;
@@ -225,11 +220,8 @@ function preprocessCautionOrders(
 
     // 4. Determine Effective Range
     const startM = oheToMeters(masterData[startIdx][labelCol]);
-    const endM = oheToMeters(masterData[endIdx][labelCol]);
     const extendedEndM = oheToMeters(masterData[currentIdx][labelCol]);
 
-    // Create a min/max range for fast checking later
-    // The valid range is everything between Start and the Extended End point
     return {
       startM: Math.min(startM, extendedEndM),
       endM: Math.max(startM, extendedEndM),
@@ -316,7 +308,7 @@ export async function analyzeData(
 
   if (!rtisLatCol || !rtisLonCol || !rtisTimeCol || !rtisSpeedCol) throw new Error("RTIS file missing critical columns");
 
-  // --- 2. Process RTIS Data (Calculate Headings) ---
+  // --- 2. Process RTIS Data (With Departure/Arrival Filtering) ---
   const depTimeMs = departureTime ? new Date(departureTime).getTime() : 0;
   const arrTimeMs = arrivalTime ? new Date(arrivalTime).getTime() : Infinity;
 
@@ -339,9 +331,11 @@ export async function analyzeData(
       };
     })
     .filter(p => !isNaN(p.lat) && !isNaN(p.lon) && p.lat !== 0 && p.lon !== 0)
+    // CRITICAL: Filter points strictly between Departure and Arrival
     .filter(p => p.time.getTime() >= depTimeMs && p.time.getTime() <= arrTimeMs)
     .sort((a, b) => a.time.getTime() - b.time.getTime());
 
+  // Calculate Headings
   for(let i = 0; i < tempRtis.length - 1; i++) {
     const dist = getDistance(tempRtis[i].lat, tempRtis[i].lon, tempRtis[i+1].lat, tempRtis[i+1].lon);
     if(dist > 5) {
@@ -365,8 +359,7 @@ export async function analyzeData(
 
   if (!masterLatCol || !masterLonCol) throw new Error("Master file missing Latitude/Longitude columns");
 
-  // --- NEW: Preprocess Caution Orders (Spatial Walk) ---
-  // We only do this if we have OHE master data available
+  // Preprocess Caution Orders (Spatial Walk)
   let processedCOs: { startM: number; endM: number; limit: number }[] = [];
   if (isOheMaster) {
     processedCOs = preprocessCautionOrders(cautionOrders, masterDataRaw, masterLabelCol, masterLatCol, masterLonCol, trainLength);
@@ -376,8 +369,7 @@ export async function analyzeData(
   const rtisMatchGrid = new GridIndex(0.01);
   rtisCleaned.forEach(p => rtisMatchGrid.insert(p.idx, p.lat, p.lon));
 
-  // --- 4. Matching Logic & Violation Detection ---
-  
+  // --- 4. Matching Logic ---
   let firstMatchedRtisIndex = Infinity; 
   let lastMatchedRtisIndex = -1;
 
@@ -425,7 +417,7 @@ export async function analyzeData(
                   const oheMeters = oheToMeters(locName);
                   let snappedMeters: number | null = null;
                   
-                  // Projection / Snapping
+                  // Projection
                   if (i < data.length - 1) {
                       const nextRow = data[i+1];
                       const nextLat = cleanCoord(nextRow[latCol]);
@@ -441,7 +433,7 @@ export async function analyzeData(
                   if (snappedMeters === null) snappedMeters = oheMeters; 
                   calculatedChainage = snappedMeters;
 
-                  // --- Limit Check using Preprocessed Spatial Data ---
+                  // Limit Check using Preprocessed Spatial Data
                   limitApplied = globalMPS;
                   for (const co of processedCOs) {
                     if (calculatedChainage >= co.startM && calculatedChainage <= co.endM) {
@@ -493,68 +485,70 @@ export async function analyzeData(
       ? rtisCleaned.filter(p => p.idx >= firstMatchedRtisIndex && p.idx <= lastMatchedRtisIndex)
       : [];
 
-  // --- 7. Brake Tests (BFT/BPT) ---
+  // --- 7. Brake Tests (IMPROVED: Time-Scoped) ---
   const brakeTests: BrakeTestResult[] = [];
-  if (validSectionData.length > 0) {
-      const startLoc = validSectionData[0];
+  const brakeAnalysisSource = rtisCleaned; // Use raw time-filtered data
+
+  if (brakeAnalysisSource.length > 0) {
+      const startLoc = brakeAnalysisSource[0];
       const entrySpeed = startLoc.speed;
+
+      // Helper to name location based on nearest OHE match
       const findLocName = (lat: number, lon: number) => {
          let minD = Infinity; let name = "Unknown";
          finalResults.forEach(r => {
              const d = getDistance(lat, lon, r.latitude, r.longitude);
-             if(d < minD && d < 1000) { minD = d; name = r.location; }
+             if(d < minD && d < 2000) { minD = d; name = `${r.location} (${Math.round(d)}m)`; }
          });
-         return name;
+         return name === "Unknown" ? `Lat:${lat.toFixed(4)}` : name;
       };
 
       if (entrySpeed > 15) {
-          const detail = `Entered section at ${entrySpeed} km/h (Already Running)`;
+          const detail = `Log starts at ${entrySpeed} km/h (Departure time may be too late).`;
           brakeTests.push({ type: 'BFT', status: 'not_performed', startSpeed: entrySpeed, lowestSpeed: entrySpeed, dropAmount: 0, location: findLocName(startLoc.lat, startLoc.lon), timestamp: startLoc.timeStr, details: detail });
           brakeTests.push({ type: 'BPT', status: 'not_performed', startSpeed: entrySpeed, lowestSpeed: entrySpeed, dropAmount: 0, location: findLocName(startLoc.lat, startLoc.lon), timestamp: startLoc.timeStr, details: detail });
       } else {
-          // BFT
-          let bftResult: BrakeTestResult | null = null;
-          for (let i = 0; i < validSectionData.length - 1; i++) {
-              const p = validSectionData[i];
+          // BFT Check
+          let bftFound = false;
+          for (let i = 0; i < brakeAnalysisSource.length - 1; i++) {
+              const p = brakeAnalysisSource[i];
+              if (getDistance(startLoc.lat, startLoc.lon, p.lat, p.lon) > 10000) break;
+
               if (p.speed > 15) {
-                  bftResult = { type: 'BFT', status: 'improper', startSpeed: p.speed, lowestSpeed: p.speed, dropAmount: 0, location: findLocName(p.lat, p.lon), timestamp: p.timeStr, details: "Speed crossed 15kmph without valid test" };
-                  break; 
-              }
-              if (p.speed >= 10 && p.speed <= 15) {
                   let minSpeed = p.speed;
-                  for(let j = i; j < Math.min(i + 20, validSectionData.length); j++) {
-                      if (validSectionData[j].speed < minSpeed) minSpeed = validSectionData[j].speed;
-                      if (validSectionData[j].speed === 0) minSpeed = 0; 
+                  for(let j = i; j < Math.min(i + 120, brakeAnalysisSource.length); j++) {
+                      if (brakeAnalysisSource[j].speed < minSpeed) minSpeed = brakeAnalysisSource[j].speed;
+                      if (brakeAnalysisSource[j].speed === 0) minSpeed = 0; 
                   }
                   if (p.speed - minSpeed >= 5) {
-                      bftResult = { type: 'BFT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findLocName(p.lat, p.lon), timestamp: p.timeStr, details: "Drop >= 5 kmph observed" };
-                      break;
+                      brakeTests.push({ type: 'BFT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findLocName(p.lat, p.lon), timestamp: p.timeStr, details: "Success: Drop >= 5 kmph observed." });
+                  } else {
+                      brakeTests.push({ type: 'BFT', status: 'improper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findLocName(p.lat, p.lon), timestamp: p.timeStr, details: "Violation: No 5kmph drop observed." });
                   }
+                  bftFound = true;
+                  break; 
               }
           }
-          if(bftResult) brakeTests.push(bftResult);
 
-          // BPT
+          // BPT Check
           let bptResult: BrakeTestResult | null = null;
-          for (let i = 0; i < validSectionData.length - 1; i++) {
-              const p = validSectionData[i];
-              if (getDistance(startLoc.lat, startLoc.lon, p.lat, p.lon) > 15000) break;
-
+          for (let i = 0; i < brakeAnalysisSource.length - 1; i++) {
+              const p = brakeAnalysisSource[i];
               if (p.speed >= 60) {
                   let minSpeed = p.speed;
-                  for(let j = i; j < Math.min(i + 60, validSectionData.length); j++) {
-                      if (validSectionData[j].speed < minSpeed) minSpeed = validSectionData[j].speed;
+                  for(let j = i; j < Math.min(i + 300, brakeAnalysisSource.length); j++) {
+                      if (brakeAnalysisSource[j].speed < minSpeed) minSpeed = brakeAnalysisSource[j].speed;
                   }
-                  if (minSpeed <= (p.speed * 0.5)) {
-                      bptResult = { type: 'BPT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findLocName(p.lat, p.lon), timestamp: p.timeStr, details: "50% Drop observed" };
+                  if (minSpeed <= (p.speed * 0.7)) { // 30%+ Drop indicates test
+                      bptResult = { type: 'BPT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findLocName(p.lat, p.lon), timestamp: p.timeStr, details: "Significant drop observed after 60kmph." };
                       break; 
                   }
               }
           }
           if (!bptResult) {
-              const opp = validSectionData.find(p => p.speed >= 60);
-              if (opp && getDistance(startLoc.lat, startLoc.lon, opp.lat, opp.lon) <= 15000) {
-                  brakeTests.push({ type: 'BPT', status: 'improper', startSpeed: opp.speed, lowestSpeed: opp.speed, dropAmount: 0, location: findLocName(opp.lat, opp.lon), timestamp: opp.timeStr, details: "Reached 60+ kmph but no 50% drop detected" });
+              const highSpeed = brakeAnalysisSource.find(p => p.speed >= 60);
+              if (highSpeed) {
+                  brakeTests.push({ type: 'BPT', status: 'improper', startSpeed: highSpeed.speed, lowestSpeed: highSpeed.speed, dropAmount: 0, location: findLocName(highSpeed.lat, highSpeed.lon), timestamp: highSpeed.timeStr, details: "Reached 60+ kmph but no test detected." });
               }
           } else {
               brakeTests.push(bptResult);
@@ -620,7 +614,6 @@ export async function analyzeData(
       }
 
       const sigHistoryIdx = signalHistory.findIndex(s => s.location === stop.location && new Date(s.logging_time).getTime() <= new Date(stop.arrivalTime).getTime());
-      
       if (sigHistoryIdx !== -1) {
           if (sigHistoryIdx > 0) {
               const prev1 = signalHistory[sigHistoryIdx - 1];

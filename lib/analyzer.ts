@@ -1,6 +1,6 @@
 import Papa from 'papaparse';
 
-// --- 1. EXPORTED TYPES (Source of Truth) ---
+// --- 1. EXPORTED INTERFACES (Used by other files) ---
 export interface CautionOrder {
   startOhe: string;
   endOhe: string;

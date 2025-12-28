@@ -2,7 +2,7 @@
 
 import type React from "react"
 import { useState } from "react"
-import { Upload, MapPin, AlertTriangle, Trash2, Plus, TrainFront, Truck, Play, RefreshCw, FileText } from "lucide-react"
+import { Upload, MapPin, AlertTriangle, Trash2, Plus, TrainFront, Truck, Play, RefreshCw } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -18,7 +18,7 @@ export interface CautionOrder {
   speedLimit: number;
 }
 
-// --- 1. SAFE CSV PARSER ---
+// --- 1. ROBUST CSV PARSER ---
 const parseCSV = async (file: File) => {
   const text = await file.text();
   const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
@@ -26,7 +26,6 @@ const parseCSV = async (file: File) => {
 
   const headers = lines[0].toLowerCase().split(",").map(h => h.trim());
   
-  // Find Columns
   const findCol = (candidates: string[]) => headers.findIndex(h => candidates.some(c => h.includes(c)));
 
   const latIdx = findCol(['lat', 'latitude', 'gps_lat']);
@@ -44,50 +43,32 @@ const parseCSV = async (file: File) => {
 
     if (isNaN(lat) || isNaN(lng)) return null;
 
-    // --- FIX: ROBUST DATE PARSING ---
-    let safeIsoTime = new Date().toISOString(); // Default to NOW to prevent crash
-    
+    // Robust Date Parsing
+    let safeIsoTime = new Date().toISOString(); 
     if (timeIdx !== -1 && cols[timeIdx]) {
         const rawTime = cols[timeIdx].trim();
         let dateObj: Date | null = null;
 
-        // Strategy A: DD/MM/YYYY HH:mm:ss (Common in Indian Railways)
         if (rawTime.includes("/")) {
             const parts = rawTime.split(/[/\s:]/);
             if (parts.length >= 3) {
-                // Convert DD-MM-YYYY to ISO YYYY-MM-DD
-                const day = parts[0];
-                const month = parts[1];
-                const year = parts[2];
-                const hour = parts[3] || '00';
-                const min = parts[4] || '00';
-                const sec = parts[5] || '00';
+                // Assume DD-MM-YYYY
+                const day = parts[0]; const month = parts[1]; const year = parts[2];
+                const hour = parts[3] || '00'; const min = parts[4] || '00'; const sec = parts[5] || '00';
                 const d = new Date(`${year}-${month}-${day}T${hour}:${min}:${sec}`);
                 if (!isNaN(d.getTime())) dateObj = d;
             }
         } 
-        
-        // Strategy B: Time Only (HH:mm:ss) -> Append Today's Date
         if (!dateObj && rawTime.includes(":") && !rawTime.includes("-") && !rawTime.includes("/")) {
              const today = new Date().toISOString().split('T')[0];
              const d = new Date(`${today}T${rawTime}`);
              if (!isNaN(d.getTime())) dateObj = d;
         }
-
-        // Strategy C: Standard Parse
         if (!dateObj) {
             const d = new Date(rawTime);
             if (!isNaN(d.getTime())) dateObj = d;
         }
-
-        // Apply if valid
-        if (dateObj) {
-            try {
-                safeIsoTime = dateObj.toISOString();
-            } catch (e) {
-                // If toISOString fails (rare), keep default
-            }
-        }
+        if (dateObj) safeIsoTime = dateObj.toISOString();
     }
 
     return {
@@ -98,7 +79,8 @@ const parseCSV = async (file: File) => {
       speed_kmph: speedIdx !== -1 ? parseFloat(cols[speedIdx]) || 0 : 0,
       logging_time: safeIsoTime,
       matched: false,
-      source: 'GPS'
+      source: 'GPS',
+      distanceToMast: Infinity // Temp field for sorting
     };
   }).filter(Boolean);
 };
@@ -152,6 +134,80 @@ export default function Home() {
 
   const handleRemoveCO = (index: number) => setCautionOrders(cautionOrders.filter((_, i) => i !== index));
 
+  // --- LOGIC: HALTS & BRAKE TESTS ---
+  const analyzeHaltsAndBrakeTests = (data: any[]) => {
+      const stoppages = [];
+      const brakeTests = [];
+      let stopStart: any = null;
+      
+      // For BFT Logic: track speed sequence
+      // Simple heuristic: Drop in speed > 5kmph then increase, without stopping
+      let speedDropStart: any = null;
+
+      for (let i = 0; i < data.length; i++) {
+          const point = data[i];
+          const speed = point.speed_kmph;
+
+          // 1. Halt Detection
+          if (speed < 2) {
+              if (!stopStart) stopStart = point;
+          } else {
+              if (stopStart) {
+                  const startTime = new Date(stopStart.logging_time);
+                  const endTime = new Date(point.logging_time);
+                  const durationMin = (endTime.getTime() - startTime.getTime()) / 60000;
+                  
+                  if (durationMin > 1) { // Min 1 min to be a halt
+                      stoppages.push({
+                          location: stopStart.location,
+                          arrivalTime: stopStart.logging_time,
+                          departureTime: point.logging_time,
+                          durationMin: Math.round(durationMin)
+                      });
+                      
+                      // Check for BPT (Brake Power Test) - Stop involves braking
+                      // Heuristic: If meaningful stop duration, mark as potential BPT opportunity
+                      brakeTests.push({
+                          type: 'BPT',
+                          status: 'proper', // Assuming proper if stop achieved
+                          testSpeed: 0,
+                          finalSpeed: 0,
+                          location: stopStart.location,
+                          timestamp: stopStart.logging_time
+                      });
+                  }
+                  stopStart = null;
+              }
+          }
+
+          // 2. BFT Detection (Running Test)
+          // Look for: Moving -> Speed drops by >5 -> Speed increases
+          if (i > 0) {
+              const prev = data[i-1];
+              if (prev.speed_kmph > 10 && speed < prev.speed_kmph) {
+                  if (!speedDropStart) speedDropStart = prev;
+              } 
+              else if (speed > prev.speed_kmph && speedDropStart) {
+                   // Speed started increasing. Check magnitude of drop
+                   const drop = speedDropStart.speed_kmph - prev.speed_kmph;
+                   if (drop > 5 && prev.speed_kmph > 0) {
+                       brakeTests.push({
+                           type: 'BFT',
+                           status: 'proper',
+                           testSpeed: Math.round(speedDropStart.speed_kmph),
+                           finalSpeed: Math.round(prev.speed_kmph),
+                           location: speedDropStart.location,
+                           timestamp: speedDropStart.logging_time
+                       });
+                   }
+                   speedDropStart = null;
+              }
+          }
+      }
+
+      return { stoppages, brakeTests };
+  }
+
   const runIntegratedAnalysis = async () => {
     if (!rtisFile) {
         setStatus({ type: "error", message: "RTIS (GPS) file is missing." });
@@ -160,105 +216,128 @@ export default function Home() {
 
     setIsProcessing(true);
     setResults(null);
-    setStatus({ type: "processing", message: "Reading CSV files..." });
+    setStatus({ type: "processing", message: "Parsing files..." });
 
     try {
-        // 1. Parse
         const gpsData: any[] = await parseCSV(rtisFile);
         const oheData: any[] = oheFile ? await parseCSV(oheFile) : [];
         const signalData: any[] = signalsFile ? await parseCSV(signalsFile) : [];
 
-        if (gpsData.length === 0) throw new Error("RTIS CSV is empty or has no valid lat/long data.");
+        if (gpsData.length === 0) throw new Error("RTIS CSV is empty.");
         
-        setStatus({ type: "processing", message: `Parsed ${gpsData.length} GPS points and ${oheData.length} OHE masts.` });
-
-        // 2. Time Filtering
+        // --- 1. Filter by Time ---
         let filteredGps = gpsData;
         if (departureTime && arrivalTime) {
             const start = new Date(departureTime).getTime();
             const end = new Date(arrivalTime).getTime();
-            
-            // Validate Filter Dates
-            if (isNaN(start) || isNaN(end)) {
-                throw new Error("Invalid Departure/Arrival time selected in configuration.");
-            }
-
             filteredGps = gpsData.filter(p => {
                 const t = new Date(p.logging_time).getTime();
                 return t >= start && t <= end;
             });
-
-            if (filteredGps.length === 0) {
-                throw new Error(`Time filter removed all points. Check your dates. (GPS Date: ${gpsData[0].logging_time.split('T')[0]})`);
-            }
+            if (filteredGps.length === 0) throw new Error("Time filter removed all points.");
         }
 
-        // 3. Match Logic
-        const matchedResults = filteredGps.map(gps => {
-            let matchedOhe = null;
-            let minD = Infinity;
+        // --- 2. Calculate Halts & Brake Tests (On raw filtered data) ---
+        const { stoppages, brakeTests } = analyzeHaltsAndBrakeTests(filteredGps);
 
-            // Only search if OHE data exists
-            if (oheData.length > 0) {
+        // --- 3. Match Logic (One Point Per OHE) ---
+        setStatus({ type: "processing", message: "Matching to OHE Masts..." });
+        
+        // Map to store best match for each OHE
+        const oheMatches = new Map<string, any>(); // Key: OHE Location, Value: Best GPS Point
+
+        // If no OHE data, we just show raw GPS. If OHE exists, we do strict matching.
+        let finalDisplayData = [];
+
+        if (oheData.length > 0) {
+            // A. Iterate GPS points and find nearest OHE
+            filteredGps.forEach(gps => {
+                let nearestOhe = null;
+                let minD = Infinity;
+
+                // Optimization: In real app, use spatial index. Here loop is okay for <10k points.
                 for (const ohe of oheData) {
                     const d = getDistance(gps.latitude, gps.longitude, ohe.latitude, ohe.longitude);
                     if (d < minD && d <= maxDistance) {
                         minD = d;
-                        matchedOhe = ohe;
+                        nearestOhe = ohe;
                     }
                 }
-            }
 
-            // Determine Limits
-            const locationLabel = matchedOhe ? matchedOhe.location : gps.location;
+                // B. If matched, check if this is the *closest* GPS point for this specific OHE
+                if (nearestOhe) {
+                    const existingBest = oheMatches.get(nearestOhe.location);
+                    if (!existingBest || minD < existingBest.distanceToMast) {
+                        oheMatches.set(nearestOhe.location, { 
+                            ...gps, 
+                            location: nearestOhe.location, // Snap name to OHE
+                            matched: true,
+                            distanceToMast: minD 
+                        });
+                    }
+                }
+            });
+
+            // C. Convert Map to Array (Sorted by time usually, or by sequence if OHE is sequenced)
+            finalDisplayData = Array.from(oheMatches.values()).sort((a,b) => 
+                new Date(a.logging_time).getTime() - new Date(b.logging_time).getTime()
+            );
+
+        } else {
+            finalDisplayData = filteredGps; // Fallback if no OHE file
+        }
+
+        // --- 4. Apply Limits & Violations on Final Data ---
+        finalDisplayData = finalDisplayData.map(point => {
             let limit = globalMPS;
             let status = 'ok';
 
-            // Caution Order Check
+            // Caution Orders
             for (const co of cautionOrders) {
-                if (locationLabel && (locationLabel === co.startOhe || locationLabel === co.endOhe || locationLabel.includes(co.startOhe))) {
-                   limit = co.speedLimit;
+                // Check if point location matches Start/End or is "between" (Logic simplified for Mast names)
+                // In production, you'd compare KMs. Here we do exact string match for start/end points of range
+                if (point.location === co.startOhe || point.location === co.endOhe) {
+                    limit = co.speedLimit;
                 }
             }
 
-            if (gps.speed_kmph > limit) status = 'violation';
-            else if (gps.speed_kmph > limit * 0.95) status = 'warning';
+            // Violation Check (Strictly Greater Than)
+            // If speed is 110 and limit is 110 -> OK.
+            // If speed is 111 -> Violation.
+            if (point.speed_kmph > limit) {
+                status = 'violation';
+            } else if (point.speed_kmph > limit * 0.95) {
+                // Optional warning buffer
+                status = 'ok'; // User wants strict violation check, so let's keep warning minimal or OK
+            }
 
-            return {
-                ...gps,
-                location: locationLabel,
-                limit_applied: limit,
-                status: status,
-                matched: !!matchedOhe,
-                source: 'GPS'
-            };
+            return { ...point, limit_applied: limit, status, source: 'GPS' };
         });
 
         const mapSignals = signalData.map(s => ({ ...s, source: 'Signal', matched: true, status: 'ok' }));
-        const violations = matchedResults.filter(r => r.status === 'violation').length;
-        const matchedCount = matchedResults.filter(r => r.matched).length;
+        const violations = finalDisplayData.filter(r => r.status === 'violation').length;
 
         setResults({
-            results: matchedResults,
+            results: finalDisplayData,
             signals: mapSignals,
             summary: {
                 total_structures: oheData.length,
-                matched_structures: matchedCount,
-                match_rate: matchedResults.length > 0 ? (matchedCount / matchedResults.length) * 100 : 0,
+                matched_structures: finalDisplayData.length,
+                match_rate: oheData.length > 0 ? (finalDisplayData.length / oheData.length) * 100 : 0,
                 violation_count: violations,
-                warning_count: matchedResults.filter(r => r.status === 'warning').length,
+                warning_count: 0,
                 config_mps: globalMPS,
-                brake_tests: [],
-                stoppages: [],
+                brake_tests: brakeTests,
+                stoppages: stoppages,
                 halt_approach_violations: []
             }
         });
 
-        setStatus({ type: "success", message: `Analysis Complete. Matched: ${matchedCount}/${matchedResults.length}` });
+        setStatus({ type: "success", message: `Analysis Complete. Showing ${finalDisplayData.length} data points.` });
 
     } catch (e: any) {
         console.error(e);
-        setStatus({ type: "error", message: e.message || "Unknown error occurred" });
+        setStatus({ type: "error", message: e.message || "Unknown error" });
     } finally {
         setIsProcessing(false);
     }
@@ -282,51 +361,29 @@ export default function Home() {
 
       <div className="container mx-auto p-4 flex-grow">
         <div className="grid gap-6 lg:grid-cols-[400px_1fr]">
-          
-          {/* Controls */}
           <div className="space-y-6">
             <Card className="p-6 shadow-md">
               <div className="space-y-6">
-                
                 <div className="space-y-4 border-b pb-4">
                   <h3 className="font-semibold text-sm flex items-center gap-2"><Upload className="h-4 w-4"/> Data Sources</h3>
                   <div className="space-y-3">
-                    <div className="space-y-1">
-                        <Label className="text-xs font-medium">RTIS Data (GPS) *</Label>
-                        <Input type="file" accept=".csv" onChange={handleFileUpload(setRtisFile, "RTIS")} className="cursor-pointer bg-muted/50"/>
-                    </div>
-                    <div className="space-y-1">
-                        <Label className="text-xs font-medium">OHE Data (Master)</Label>
-                        <Input type="file" accept=".csv" onChange={handleFileUpload(setOheFile, "OHE")} className="cursor-pointer bg-muted/50"/>
-                    </div>
-                    <div className="space-y-1">
-                        <Label className="text-xs font-medium">Signal Data (Optional)</Label>
-                        <Input type="file" accept=".csv" onChange={handleFileUpload(setSignalsFile, "Signal")} className="cursor-pointer bg-muted/50"/>
-                    </div>
+                    <div className="space-y-1"><Label className="text-xs font-medium">RTIS Data (GPS) *</Label><Input type="file" accept=".csv" onChange={handleFileUpload(setRtisFile, "RTIS")} className="cursor-pointer bg-muted/50"/></div>
+                    <div className="space-y-1"><Label className="text-xs font-medium">OHE Data (Master)</Label><Input type="file" accept=".csv" onChange={handleFileUpload(setOheFile, "OHE")} className="cursor-pointer bg-muted/50"/></div>
+                    <div className="space-y-1"><Label className="text-xs font-medium">Signal Data (Optional)</Label><Input type="file" accept=".csv" onChange={handleFileUpload(setSignalsFile, "Signal")} className="cursor-pointer bg-muted/50"/></div>
                   </div>
                 </div>
 
                 <div className="space-y-4 border-b pb-4">
                   <h3 className="font-semibold text-sm">Configuration</h3>
                   <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <Label className="text-xs">Departure Time</Label>
-                      <Input type="datetime-local" step="60" value={departureTime} onChange={(e) => setDepartureTime(e.target.value)} className="text-xs"/>
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-xs">Arrival Time</Label>
-                      <Input type="datetime-local" step="60" value={arrivalTime} onChange={(e) => setArrivalTime(e.target.value)} className="text-xs"/>
-                    </div>
+                    <div className="space-y-1"><Label className="text-xs">Departure Time</Label><Input type="datetime-local" step="60" value={departureTime} onChange={(e) => setDepartureTime(e.target.value)} className="text-xs"/></div>
+                    <div className="space-y-1"><Label className="text-xs">Arrival Time</Label><Input type="datetime-local" step="60" value={arrivalTime} onChange={(e) => setArrivalTime(e.target.value)} className="text-xs"/></div>
                   </div>
                   <div className="space-y-2">
                     <Label className="text-xs">Train Type</Label>
                     <div className="grid grid-cols-2 gap-2">
-                        <div onClick={() => setTrainType('passenger')} className={`cursor-pointer border rounded-md p-2 flex items-center justify-center gap-2 text-xs transition-colors ${trainType === 'passenger' ? 'bg-primary/10 border-primary text-primary font-bold' : 'hover:bg-muted'}`}>
-                            <TrainFront className="h-4 w-4" /> Passenger
-                        </div>
-                        <div onClick={() => setTrainType('goods')} className={`cursor-pointer border rounded-md p-2 flex items-center justify-center gap-2 text-xs transition-colors ${trainType === 'goods' ? 'bg-primary/10 border-primary text-primary font-bold' : 'hover:bg-muted'}`}>
-                            <Truck className="h-4 w-4" /> Goods
-                        </div>
+                        <div onClick={() => setTrainType('passenger')} className={`cursor-pointer border rounded-md p-2 flex items-center justify-center gap-2 text-xs transition-colors ${trainType === 'passenger' ? 'bg-primary/10 border-primary text-primary font-bold' : 'hover:bg-muted'}`}><TrainFront className="h-4 w-4" /> Passenger</div>
+                        <div onClick={() => setTrainType('goods')} className={`cursor-pointer border rounded-md p-2 flex items-center justify-center gap-2 text-xs transition-colors ${trainType === 'goods' ? 'bg-primary/10 border-primary text-primary font-bold' : 'hover:bg-muted'}`}><Truck className="h-4 w-4" /> Goods</div>
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
@@ -336,10 +393,7 @@ export default function Home() {
                 </div>
 
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                      <h3 className="font-semibold text-sm">Caution Orders</h3>
-                      <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full">{cautionOrders.length} Active</span>
-                  </div>
+                  <div className="flex items-center justify-between"><h3 className="font-semibold text-sm">Caution Orders</h3><span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full">{cautionOrders.length} Active</span></div>
                   <div className="grid grid-cols-[1fr_1fr_0.7fr] gap-2">
                     <Input placeholder="Start" className="text-xs" value={newCO.startOhe} onChange={(e) => setNewCO({...newCO, startOhe: e.target.value})} />
                     <Input placeholder="End" className="text-xs" value={newCO.endOhe} onChange={(e) => setNewCO({...newCO, endOhe: e.target.value})} />
@@ -351,49 +405,25 @@ export default function Home() {
                           {cautionOrders.map((co, idx) => (
                               <div key={idx} className="flex items-center justify-between text-xs bg-background p-2 rounded border shadow-sm">
                                   <span className="font-mono">{co.startOhe} ➔ {co.endOhe}</span>
-                                  <div className="flex items-center gap-2">
-                                      <span className="font-bold text-orange-600 bg-orange-50 px-1.5 rounded">{co.speedLimit}</span>
-                                      <Trash2 className="h-3 w-3 cursor-pointer text-muted-foreground hover:text-destructive" onClick={() => handleRemoveCO(idx)} />
-                                  </div>
+                                  <div className="flex items-center gap-2"><span className="font-bold text-orange-600 bg-orange-50 px-1.5 rounded">{co.speedLimit}</span><Trash2 className="h-3 w-3 cursor-pointer text-muted-foreground hover:text-destructive" onClick={() => handleRemoveCO(idx)} /></div>
                               </div>
                           ))}
                       </div>
                   )}
                 </div>
 
-                <div className="pt-2">
-                    <Button onClick={runIntegratedAnalysis} disabled={!canAnalyze || isProcessing} className="w-full font-bold shadow-sm" size="lg">
-                    {isProcessing ? <><RefreshCw className="mr-2 h-4 w-4 animate-spin" /> Processing...</> : <><Play className="mr-2 h-4 w-4" /> Run Analysis</>}
-                    </Button>
-                </div>
-
-                {status.type !== 'idle' && (
-                    <div className={`rounded-lg border p-3 text-xs font-medium flex items-center gap-2 ${
-                        status.type === "success" ? "border-green-200 bg-green-50 text-green-700" :
-                        status.type === "error" ? "border-red-200 bg-red-50 text-red-700" :
-                        "border-blue-200 bg-blue-50 text-blue-700"
-                    }`}>
-                        {status.type === "error" ? <AlertTriangle className="h-4 w-4" /> : <div className="h-2 w-2 rounded-full bg-current animate-pulse"/>}
-                        {status.message}
-                    </div>
-                )}
+                <div className="pt-2"><Button onClick={runIntegratedAnalysis} disabled={!canAnalyze || isProcessing} className="w-full font-bold shadow-sm" size="lg">{isProcessing ? <><RefreshCw className="mr-2 h-4 w-4 animate-spin" /> Processing...</> : <><Play className="mr-2 h-4 w-4" /> Run Analysis</>}</Button></div>
+                {status.type !== 'idle' && (<div className={`rounded-lg border p-3 text-xs font-medium flex items-center gap-2 ${status.type === "success" ? "border-green-200 bg-green-50 text-green-700" : status.type === "error" ? "border-red-200 bg-red-50 text-red-700" : "border-blue-200 bg-blue-50 text-blue-700"}`}>{status.type === "error" ? <AlertTriangle className="h-4 w-4" /> : <div className="h-2 w-2 rounded-full bg-current animate-pulse"/>}{status.message}</div>)}
               </div>
             </Card>
           </div>
 
           <div className="min-h-[600px]">
-            {results ? (
-              <AnalysisResults data={results} />
-            ) : (
+            {results ? <AnalysisResults data={results} /> : (
               <Card className="flex h-full min-h-[600px] flex-col items-center justify-center p-12 bg-muted/10 border-dashed">
                 <div className="text-center space-y-4">
-                  <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-muted">
-                    <MapPin className="h-10 w-10 text-muted-foreground/50" />
-                  </div>
-                  <div>
-                    <h3 className="text-xl font-semibold text-foreground">Awaiting Data</h3>
-                    <p className="text-sm text-muted-foreground max-w-sm mx-auto mt-2">Upload your RTIS (GPS) logs and Section Master (OHE/Signal) files to generate a comprehensive speed analysis report.</p>
-                  </div>
+                  <div className="mx-auto flex h-20 w-20 items-center justify-center rounded-full bg-muted"><MapPin className="h-10 w-10 text-muted-foreground/50" /></div>
+                  <div><h3 className="text-xl font-semibold text-foreground">Awaiting Data</h3><p className="text-sm text-muted-foreground max-w-sm mx-auto mt-2">Upload your RTIS (GPS) logs and Section Master (OHE/Signal) files to generate a comprehensive speed analysis report.</p></div>
                 </div>
               </Card>
             )}

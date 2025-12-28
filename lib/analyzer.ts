@@ -26,12 +26,13 @@ export interface Stoppage {
   arrivalTime: string;
   departureTime: string;
   durationMin: number;
-  isSignal: boolean; // New Flag
+  isSignal: boolean;
 }
 
+// Updated Interface for Signal Backtracking
 export interface HaltApproachViolation {
-  haltLocation: string;
-  distanceMarker: '100m' | '1000m' | '2000m';
+  haltLocation: string; // The Signal where train stopped
+  checkpoint: string;   // "100m Approach", "Prev Signal", "2nd Prev Signal"
   limit: number;
   actualSpeed: number;
   timestamp: string;
@@ -196,7 +197,9 @@ export async function analyzeData(
   maxDistance: number,
   globalMPS: number,
   cautionOrders: CautionOrder[],
-  trainType: TrainType
+  trainType: TrainType,
+  departureTime?: string,
+  arrivalTime?: string
 ): Promise<{ summary: AnalysisSummary; results: AnalysisResult[]; signals: AnalysisResult[] }> {
   
   // 1. Parse Inputs
@@ -209,12 +212,12 @@ export async function analyzeData(
 
   const rtisLatCol = findColumn(rtisDataRaw, ["Latitude", "lat", "gps_lat"]);
   const rtisLonCol = findColumn(rtisDataRaw, ["Longitude", "lon", "long", "gps_long"]);
-  const rtisTime = findColumn(rtisDataRaw, ["Logging Time", "LoggingTime", "timestamp", "date", "time"]);
-  const rtisSpeed = findColumn(rtisDataRaw, ["Speed", "speed", "speed_kmph", "velocity"]);
+  const rtisTimeCol = findColumn(rtisDataRaw, ["Logging Time", "LoggingTime", "timestamp", "date", "time"]);
+  const rtisSpeedCol = findColumn(rtisDataRaw, ["Speed", "speed", "speed_kmph", "velocity"]);
 
-  if (!rtisLatCol || !rtisLonCol || !rtisTime || !rtisSpeed) throw new Error("RTIS file missing critical columns");
+  if (!rtisLatCol || !rtisLonCol || !rtisTimeCol || !rtisSpeedCol) throw new Error("RTIS file missing critical columns");
 
-  // 2. Identify Columns
+  // 2. Identify Master Columns
   const isOheMaster = oheDataRaw.length > 0;
   let masterDataRaw = isOheMaster ? oheDataRaw : signalsDataRaw;
   
@@ -282,7 +285,7 @@ export async function analyzeData(
       candidates.forEach(c => {
           const signal = signalDataList[c.idx];
           const dist = haversineMeters(lat, lon, signal.lat, signal.lon);
-          if (dist < 100 && dist < bestDist) { // Strict 100m check for Halt
+          if (dist < 100 && dist < bestDist) { 
               bestDist = dist;
               bestName = signal.name;
           }
@@ -290,27 +293,32 @@ export async function analyzeData(
       return { found: bestDist < 100, name: bestName };
   };
 
-  // --- STEP 4: PREPARE RTIS ---
+  // --- STEP 4: PREPARE & FILTER RTIS ---
+  const depTimeMs = departureTime ? new Date(departureTime).getTime() : 0;
+  const arrTimeMs = arrivalTime ? new Date(arrivalTime).getTime() : Infinity;
+
   const rtisCleaned = rtisDataRaw
     .map((row, idx) => {
       let lat = cleanCoord(row[rtisLatCol]);
       let lon = cleanCoord(row[rtisLonCol]);
-      const speedRaw = parseFloat(row[rtisSpeed]);
-      const timeStr = row[rtisTime];
+      const speedRaw = parseFloat(row[rtisSpeedCol]);
+      const timeStr = row[rtisTimeCol];
       if (lat > 60 && lon < 40) { [lat, lon] = [lon, lat]; }
       const roundedSpeed = !isNaN(speedRaw) ? Math.round(speedRaw) : 0;
+      const timeDate = timeStr ? new Date(timeStr) : new Date(0);
 
       return {
         idx,
         lat,
         lon,
         speed: roundedSpeed, 
-        time: timeStr ? new Date(timeStr) : new Date(0),
+        time: timeDate,
         timeStr,
         valid: !isNaN(lat) && !isNaN(lon) && lat !== 0 && lon !== 0
       };
     })
     .filter(p => p.valid)
+    .filter(p => p.time.getTime() >= depTimeMs && p.time.getTime() <= arrTimeMs)
     .sort((a, b) => a.time.getTime() - b.time.getTime());
 
   // --- STEP 5: MATCHING & CAUTION LOGIC ---
@@ -384,24 +392,30 @@ export async function analyzeData(
 
   const finalResults = processDataset(masterDataRaw, isOheMaster ? 'OHE' : 'Signal', masterLatCol, masterLonCol, masterLabelCol);
   
+  // *** GENERATE SIGNAL HISTORY FOR BACKTRACKING ***
   let signalResults: AnalysisResult[] = [];
+  let signalHistory: AnalysisResult[] = []; // Sorted list of passed signals
+
   if (isOheMaster && signalsDataRaw.length > 0) {
      const sLat = findColumn(signalsDataRaw, ["Latitude", "latitude", "lat"]);
      const sLon = findColumn(signalsDataRaw, ["Longitude", "longitude", "lon"]);
      const sLbl = findColumn(signalsDataRaw, ["Signal", "Name", "Label", "Station"]);
      if (sLat && sLon) {
          signalResults = processDataset(signalsDataRaw, 'Signal', sLat, sLon, sLbl || "Signal");
+         // Filter only matched signals and sort by time
+         signalHistory = signalResults
+            .filter(s => s.matched && s.logging_time)
+            .sort((a, b) => new Date(a.logging_time).getTime() - new Date(b.logging_time).getTime());
      }
   }
 
-  // --- STEP 6: CREATE VALID SECTION DATA ---
+  // --- STEP 6: VALID SECTION DATA ---
   const validSectionData = (firstMatchedRtisIndex !== Infinity && lastMatchedRtisIndex !== -1)
       ? rtisCleaned.filter(p => p.idx >= firstMatchedRtisIndex && p.idx <= lastMatchedRtisIndex)
       : [];
 
-  // --- STEP 7: BRAKE TESTS (ON VALID SECTION) ---
+  // --- STEP 7: BRAKE TESTS ---
   const brakeTests: BrakeTestResult[] = [];
-  
   if (validSectionData.length > 0) {
       const startLoc = validSectionData[0];
       const BFT_TARGET_MIN = 10, BFT_TARGET_MAX = 15, BFT_FAIL_THRESHOLD = 15, BFT_DROP_REQ = 5;
@@ -427,7 +441,7 @@ export async function analyzeData(
               return { passed, minSpeed };
           };
 
-          // BFT
+          // BFT & BPT Loops... (Standard Logic)
           let bftDone = false;
           for (let i = 0; i < validSectionData.length - 1; i++) {
               const p = validSectionData[i];
@@ -443,8 +457,6 @@ export async function analyzeData(
                   }
               }
           }
-
-          // BPT
           let bptDone = false;
           for (let i = 0; i < validSectionData.length - 1; i++) {
               const p = validSectionData[i];
@@ -467,7 +479,7 @@ export async function analyzeData(
       }
   }
 
-  // --- STEP 8: STOPPAGES (ON VALID SECTION) ---
+  // --- STEP 8: STOPPAGES ---
   const stoppages: Stoppage[] = [];
   let stopStart: (typeof rtisCleaned[0]) | null = null;
   const stoppageSource = validSectionData.length > 0 ? validSectionData : [];
@@ -480,9 +492,7 @@ export async function analyzeData(
           if (stopStart) {
               const durationMs = p.time.getTime() - stopStart.time.getTime();
               if (durationMs > 30000) { 
-                  // Check if this stop is at a signal
                   const sigCheck = isNearSignal(stopStart.lat, stopStart.lon);
-                  
                   stoppages.push({
                       location: sigCheck.found ? sigCheck.name : findNearestLocation(stopStart.lat, stopStart.lon),
                       latitude: stopStart.lat,
@@ -490,7 +500,7 @@ export async function analyzeData(
                       arrivalTime: stopStart.timeStr,
                       departureTime: p.timeStr,
                       durationMin: Math.round(durationMs / 60000),
-                      isSignal: sigCheck.found // Tag it
+                      isSignal: sigCheck.found
                   });
               }
               stopStart = null;
@@ -498,37 +508,76 @@ export async function analyzeData(
       }
   }
 
-  // --- STEP 9: HALT VIOLATIONS (Signal Checks) ---
+  // --- STEP 9: HALT VIOLATIONS (BACKTRACKING LOGIC) ---
   const haltViolations: HaltApproachViolation[] = [];
-  const LIMITS = trainType === 'passenger' ? { d100: 10, d1000: 60, d2000: 100 } : { d100: 5, d1000: 40, d2000: 55 };
+  
+  // Configurable Limits
+  const APPROACH_LIMIT_100M = 15; // kmph
+  const SIGNAL_PREV_1_LIMIT = 60; // kmph
+  const SIGNAL_PREV_2_LIMIT = 100; // kmph
 
   stoppages.forEach(stop => {
-      // Logic: Only check if it was a SIGNAL stop
+      // 1. Must be a Signal Stop
       if (!stop.isSignal) return;
 
+      // 2. Find Stop Index in RTIS
       const stopIdx = stoppageSource.findIndex(p => p.timeStr === stop.arrivalTime);
       if (stopIdx === -1) return;
-      
-      let f100=false, f1000=false, f2000=false;
-      // Scan backwards from stop time
+
+      // CHECK A: Immediate Approach (100m)
+      let found100Violation = false;
       for (let i = stopIdx - 1; i >= 0; i--) {
           const p = stoppageSource[i];
           const dist = haversineMeters(stop.latitude, stop.longitude, p.lat, p.lon);
-          
-          if (!f100 && dist >= 100 && dist < 200) { 
-              if (p.speed > LIMITS.d100) haltViolations.push({ haltLocation: stop.location, distanceMarker: '100m', limit: LIMITS.d100, actualSpeed: p.speed, timestamp: p.timeStr }); 
-              f100 = true; 
+          if (dist > 100) break; // Only check last 100m
+          if (p.speed > APPROACH_LIMIT_100M) {
+              // Found violation
+              haltViolations.push({ 
+                  haltLocation: stop.location, 
+                  checkpoint: '100m Approach', 
+                  limit: APPROACH_LIMIT_100M, 
+                  actualSpeed: p.speed, 
+                  timestamp: p.timeStr 
+              });
+              found100Violation = true;
+              break; // One violation per category is enough
           }
-          if (!f1000 && dist >= 1000 && dist < 1200) { 
-              if (p.speed > LIMITS.d1000) haltViolations.push({ haltLocation: stop.location, distanceMarker: '1000m', limit: LIMITS.d1000, actualSpeed: p.speed, timestamp: p.timeStr }); 
-              f1000 = true; 
+      }
+
+      // CHECK B: Previous Signals Backtracking
+      // Find this signal in history
+      const sigHistoryIdx = signalHistory.findIndex(s => s.location === stop.location && new Date(s.logging_time).getTime() <= new Date(stop.arrivalTime).getTime());
+      
+      if (sigHistoryIdx !== -1) {
+          // Check Previous Signal (-1)
+          if (sigHistoryIdx > 0) {
+              const prev1 = signalHistory[sigHistoryIdx - 1];
+              const prev1Speed = prev1.speed_kmph || 0;
+              if (prev1Speed > SIGNAL_PREV_1_LIMIT) {
+                  haltViolations.push({
+                      haltLocation: stop.location,
+                      checkpoint: `Prev Signal (${prev1.location})`,
+                      limit: SIGNAL_PREV_1_LIMIT,
+                      actualSpeed: Math.round(prev1Speed),
+                      timestamp: prev1.logging_time
+                  });
+              }
           }
-          if (!f2000 && dist >= 2000 && dist < 2300) { 
-              if (p.speed > LIMITS.d2000) haltViolations.push({ haltLocation: stop.location, distanceMarker: '2000m', limit: LIMITS.d2000, actualSpeed: p.speed, timestamp: p.timeStr }); 
-              f2000 = true; 
-              break; // Optimization: stop looking after 2km
+
+          // Check 2nd Previous Signal (-2)
+          if (sigHistoryIdx > 1) {
+              const prev2 = signalHistory[sigHistoryIdx - 2];
+              const prev2Speed = prev2.speed_kmph || 0;
+              if (prev2Speed > SIGNAL_PREV_2_LIMIT) {
+                  haltViolations.push({
+                      haltLocation: stop.location,
+                      checkpoint: `2nd Prev Signal (${prev2.location})`,
+                      limit: SIGNAL_PREV_2_LIMIT,
+                      actualSpeed: Math.round(prev2Speed),
+                      timestamp: prev2.logging_time
+                  });
+              }
           }
-          if (dist > 3000) break; 
       }
   });
 

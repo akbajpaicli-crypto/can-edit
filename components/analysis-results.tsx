@@ -21,53 +21,14 @@ import {
 import jsPDF from "jspdf"
 import autoTable from "jspdf-autotable"
 
-interface Stoppage {
-  location: string;
-  arrivalTime: string;
-  departureTime: string;
-  durationMin: number;
-  isSignal?: boolean;
-}
-
-interface BrakeTestResult {
-  type: 'BFT' | 'BPT';
-  status: 'proper' | 'improper' | 'not_performed';
-  startSpeed: number;
-  lowestSpeed: number;
-  dropAmount: number;
-  location: string;
-  timestamp: string;
-  details?: string;
-}
-
-interface HaltApproachViolation {
-  haltLocation: string;
-  checkpoint: string;
-  limit: number;
-  actualSpeed: number;
-  timestamp: string;
-}
+// --- IMPORT TYPES FROM ANALYZER (No more duplication errors) ---
+import { AnalysisSummary, AnalysisResult } from "@/lib/analyzer"
 
 interface AnalysisResultProps {
   data: {
-    summary: {
-      total_structures: number;
-      matched_structures: number;
-      unmatched_structures: number;
-      match_rate: number;
-      avg_speed: number;
-      max_speed: number;
-      min_speed: number;
-      violation_count: number;
-      warning_count: number;
-      config_mps: number;
-      train_type: 'passenger' | 'goods';
-      stoppages: Stoppage[];
-      brake_tests: BrakeTestResult[];
-      halt_approach_violations: HaltApproachViolation[];
-    };
-    results: Array<any>;
-    signals: Array<any>;
+    summary: AnalysisSummary;
+    results: AnalysisResult[];
+    signals: AnalysisResult[];
   }
 }
 
@@ -485,7 +446,6 @@ export function AnalysisResults({ data }: AnalysisResultProps) {
           <DialogHeader><DialogTitle>Generate Report</DialogTitle><DialogDescription>Enter trip details.</DialogDescription></DialogHeader>
           <div className="grid gap-4 py-4">
              <div className="grid grid-cols-2 gap-4"><div className="space-y-2"><Label>Train No</Label><Input value={reportDetails.trainNo} onChange={e => setReportDetails({...reportDetails, trainNo: e.target.value})} /></div><div className="space-y-2"><Label>Loco No</Label><Input value={reportDetails.locoNo} onChange={e => setReportDetails({...reportDetails, locoNo: e.target.value})} /></div></div>
-             
              <div className="grid grid-cols-2 gap-4">
                  <div className="space-y-2">
                      <Label>Train Type</Label>
@@ -499,7 +459,6 @@ export function AnalysisResults({ data }: AnalysisResultProps) {
                  </div>
                  <div className="space-y-2"><Label>Section</Label><Input value={reportDetails.section} onChange={e => setReportDetails({...reportDetails, section: e.target.value})} /></div>
              </div>
-
              <div className="grid grid-cols-2 gap-4"><div className="space-y-2"><Label>LP Name</Label><Input value={reportDetails.lpName} onChange={e => setReportDetails({...reportDetails, lpName: e.target.value})} /></div><div className="space-y-2"><Label>ALP Name</Label><Input value={reportDetails.alpName} onChange={e => setReportDetails({...reportDetails, alpName: e.target.value})} /></div></div>
              <div className="grid grid-cols-2 gap-4"><div className="space-y-2"><Label>CLI Name</Label><Input value={reportDetails.cliName} onChange={e => setReportDetails({...reportDetails, cliName: e.target.value})} /></div><div className="space-y-2"><Label>MPS</Label><Input value={reportDetails.mps} onChange={e => setReportDetails({...reportDetails, mps: e.target.value})} /></div></div>
              <div className="space-y-2"><Label>Remarks</Label><Input value={reportDetails.globalRemarks} onChange={e => setReportDetails({...reportDetails, globalRemarks: e.target.value})} /></div>

@@ -80,7 +80,7 @@ const parseCSV = async (file: File) => {
       logging_time: safeIsoTime,
       matched: false,
       source: 'GPS',
-      distanceToMast: Infinity // Temp field for sorting
+      distanceToMast: Infinity 
     };
   }).filter(Boolean);
 };
@@ -134,7 +134,6 @@ export default function Home() {
 
   const handleRemoveCO = (index: number) => setCautionOrders(cautionOrders.filter((_, i) => i !== index));
 
-  // --- LOGIC: HALTS & BRAKE TESTS (Run on Full Raw Data) ---
   const analyzeHaltsAndBrakeTests = (data: any[]) => {
       const stoppages = [];
       const brakeTests = [];
@@ -156,17 +155,14 @@ export default function Home() {
                   const endTime = new Date(point.logging_time);
                   const durationMin = (endTime.getTime() - startTime.getTime()) / 60000;
                   
-                  // UPDATED LOGIC: > 15 seconds (0.25 minutes)
                   if (durationMin > 0.25) { 
                       stoppages.push({
                           location: stopStart.location || `GPS Near ${stopStart.latitude.toFixed(4)}`,
                           arrivalTime: stopStart.logging_time,
                           departureTime: point.logging_time,
-                          // Use toFixed(1) to show decimal minutes for short stops (e.g. 0.5 min)
                           durationMin: Number(durationMin.toFixed(1))
                       });
                       
-                      // BPT Check: If stopped for > 0.25 min, likely a stop/start event
                       brakeTests.push({
                           type: 'BPT',
                           status: 'proper', 
@@ -222,15 +218,12 @@ export default function Home() {
 
         if (gpsData.length === 0) throw new Error("RTIS CSV is empty.");
         
-        // --- 1. Filter by Time ---
         let filteredGps = gpsData;
         if (departureTime && arrivalTime) {
             const start = new Date(departureTime).getTime();
             const end = new Date(arrivalTime).getTime();
             
-            if (end <= start) {
-                throw new Error("End Time must be after Start Time. Please correct the dates.");
-            }
+            if (end <= start) throw new Error("End Time must be after Start Time.");
 
             filteredGps = gpsData.filter(p => {
                 const t = new Date(p.logging_time).getTime();
@@ -239,10 +232,8 @@ export default function Home() {
             if (filteredGps.length === 0) throw new Error("Time filter removed all points. Check your dates.");
         }
 
-        // --- 2. Calculate Halts & Brake Tests (BEFORE reduction) ---
         const { stoppages, brakeTests } = analyzeHaltsAndBrakeTests(filteredGps);
 
-        // --- 3. Match Logic (Strict: One Point Per OHE) ---
         setStatus({ type: "processing", message: "Matching to OHE Masts..." });
         
         let finalDisplayData = [];
@@ -283,12 +274,10 @@ export default function Home() {
             finalDisplayData = filteredGps.map(p => ({...p, distanceToMast: 0, matched: false})); 
         }
 
-        // --- 4. NEW LOGIC: MPS+1..3=Warning, MPS+4=Violation ---
         finalDisplayData = finalDisplayData.map(point => {
             let limit = globalMPS;
             let status = 'ok';
 
-            // Caution Orders Override
             for (const co of cautionOrders) {
                 if (point.location === co.startOhe || point.location === co.endOhe) {
                     limit = co.speedLimit;
@@ -296,14 +285,9 @@ export default function Home() {
             }
 
             const speed = point.speed_kmph;
-
-            if (speed <= limit) {
-                status = 'ok';
-            } else if (speed < limit + 4) {
-                status = 'warning';
-            } else {
-                status = 'violation';
-            }
+            if (speed <= limit) status = 'ok';
+            else if (speed < limit + 4) status = 'warning';
+            else status = 'violation';
 
             return { ...point, limit_applied: limit, status, source: 'GPS' };
         });
@@ -362,9 +346,19 @@ export default function Home() {
                 <div className="space-y-4 border-b pb-4">
                   <h3 className="font-semibold text-sm flex items-center gap-2"><Upload className="h-4 w-4"/> Data Sources</h3>
                   <div className="space-y-3">
-                    <div className="space-y-1"><Label className="text-xs font-medium">RTIS Data (GPS) *</Label><Input type="file" accept=".csv" onChange={handleFileUpload(setRtisFile, "RTIS")} className="cursor-pointer bg-muted/50"/></div>
-                    <div className="space-y-1"><Label className="text-xs font-medium">OHE Data (Master)</Label><Input type="file" accept=".csv" onChange={handleFileUpload(setOheFile, "OHE")} className="cursor-pointer bg-muted/50"/></div>
-                    <div className="space-y-1"><Label className="text-xs font-medium">Signal Data (Optional)</Label><Input type="file" accept=".csv" onChange={handleFileUpload(setSignalsFile, "Signal")} className="cursor-pointer bg-muted/50"/></div>
+                    <div className="space-y-1">
+                        <Label className="text-xs font-medium">RTIS Data (GPS) *</Label>
+                        {/* FIX: KEY added to force visual reset if state is lost */}
+                        <Input key={rtisFile ? "loaded" : "empty"} type="file" accept=".csv" onChange={handleFileUpload(setRtisFile, "RTIS")} className="cursor-pointer bg-muted/50"/>
+                    </div>
+                    <div className="space-y-1">
+                        <Label className="text-xs font-medium">OHE Data (Master)</Label>
+                        <Input key={oheFile ? "loaded" : "empty"} type="file" accept=".csv" onChange={handleFileUpload(setOheFile, "OHE")} className="cursor-pointer bg-muted/50"/>
+                    </div>
+                    <div className="space-y-1">
+                        <Label className="text-xs font-medium">Signal Data (Optional)</Label>
+                        <Input key={signalsFile ? "loaded" : "empty"} type="file" accept=".csv" onChange={handleFileUpload(setSignalsFile, "Signal")} className="cursor-pointer bg-muted/50"/>
+                    </div>
                   </div>
                 </div>
 

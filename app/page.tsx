@@ -1,14 +1,14 @@
 "use client"
 
 import type React from "react"
-
 import { useState } from "react"
-import { Upload, MapPin, Radio, AlertTriangle, Trash2, Plus, TrainFront, Truck } from "lucide-react"
+import { Upload, MapPin, AlertTriangle, Trash2, Plus, TrainFront, Truck } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { AnalysisResults } from "@/components/analysis-results"
+// IMPORTANT: Importing directly from lib ensures client-side execution (no server timeout)
 import { analyzeData, CautionOrder, TrainType } from "@/lib/analyzer"
 
 export default function Home() {
@@ -71,9 +71,10 @@ export default function Home() {
     }
 
     setIsProcessing(true)
-    setStatus({ type: "processing", message: "Processing..." })
+    setStatus({ type: "processing", message: "Processing... (This runs in your browser)" })
 
     try {
+      // Direct Function Call (Client Side)
       const data = await analyzeData(rtisFile, oheFile, signalsFile, maxDistance, globalMPS, cautionOrders, trainType)
       setResults(data)
       setStatus({ type: "success", message: `Success! Processed ${data.summary.total_structures} locations.` })
@@ -95,7 +96,7 @@ export default function Home() {
         <div className="container mx-auto px-4 py-3">
           <div className="flex items-center gap-4">
             
-            {/* LOGO: Hidden automatically if file not found */}
+            {/* LOGO */}
             <div className="flex-shrink-0">
                <img 
                  src="/railway-logo.jpeg" 
@@ -107,7 +108,7 @@ export default function Home() {
                />
             </div>
 
-            {/* Title Text (Thunder Icon Removed) */}
+            {/* Title Text */}
             <div>
                 <h1 className="text-2xl font-bold text-foreground leading-tight tracking-tight">Railway Geo-Analytics Platform</h1>
                 <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">West Central Railway • Jabalpur Division</p>

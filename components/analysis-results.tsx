@@ -21,7 +21,7 @@ import {
 import jsPDF from "jspdf"
 import autoTable from "jspdf-autotable"
 
-// SAFE RELATIVE IMPORT
+// SAFE RELATIVE IMPORT TO PREVENT PATH ALIAS ERRORS
 import { AnalysisSummary, AnalysisResult } from "../lib/analyzer"
 
 interface AnalysisResultProps {
@@ -61,7 +61,9 @@ export function AnalysisResults({ data }: AnalysisResultProps) {
   const [filterType, setFilterType] = useState<"all" | "violation" | "warning" | "matched" | "unmatched">("all")
   const [isReportDialogOpen, setIsReportDialogOpen] = useState(false)
   
-  const [reportDetails, setReportDetails] = useState({ trainNo: "", locoNo: "", lpName: "", alpName: "", cliName: "", section: "", trainType: data.summary.train_type || "goods", mps: data.summary.config_mps ? `${data.summary.config_mps} km/h` : "", fromLoc: "", toLoc: "", globalRemarks: "" })
+  const [reportDetails, setReportDetails] = useState({
+    trainNo: "", locoNo: "", lpName: "", alpName: "", cliName: "", section: "", trainType: data.summary.train_type || "goods", mps: data.summary.config_mps ? `${data.summary.config_mps} km/h` : "", fromLoc: "", toLoc: "", globalRemarks: "" 
+  })
   const [signatureImg, setSignatureImg] = useState<string | null>(null)
 
   const combinedData = useMemo(() => {

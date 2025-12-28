@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { AnalysisResults } from "@/components/analysis-results"
 
+// --- TYPES ---
 export type TrainType = 'passenger' | 'goods';
 
 export interface CautionOrder {
@@ -17,6 +18,31 @@ export interface CautionOrder {
   speedLimit: number;
 }
 
+// --- HELPERS ---
+
+// Convert "755/10" -> 755.10 for range comparison
+const parseMastToNumber = (mast: string): number => {
+    if (!mast) return 0;
+    const parts = mast.split('/');
+    if (parts.length === 2) {
+        return parseFloat(`${parts[0]}.${parts[1]}`);
+    }
+    return parseFloat(mast) || 0;
+};
+
+// Check if a location falls within a caution order range
+const isLocationInCautionRange = (currentLoc: string, startLoc: string, endLoc: string): boolean => {
+    const current = parseMastToNumber(currentLoc);
+    const start = parseMastToNumber(startLoc);
+    const end = parseMastToNumber(endLoc);
+    
+    if (current === 0 || start === 0 || end === 0) return false;
+    
+    // Handle both ascending and descending directions
+    return (current >= Math.min(start, end)) && (current <= Math.max(start, end));
+};
+
+// --- 1. ROBUST CSV PARSER ---
 const parseCSV = async (file: File) => {
   const text = await file.text();
   const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
@@ -73,6 +99,7 @@ const parseCSV = async (file: File) => {
   }).filter(Boolean);
 };
 
+// --- 2. DISTANCE UTILS ---
 const getDistance = (lat1: number, lon1: number, lat2: number, lon2: number) => {
   const R = 6371e3; 
   const φ1 = lat1 * Math.PI / 180;
@@ -125,8 +152,8 @@ export default function Home() {
           const point = sorted[i];
           const speed = point.speed_kmph;
 
-          // RELAXED STOPPAGE LOGIC: Speed < 5 kmph (account for GPS drift)
-          if (speed < 5) {
+          // --- 1. Halt & BPT Logic ---
+          if (speed < 5) { // Relaxed stop threshold
               if (!stopStart) stopStart = point;
           } else {
               if (stopStart) {
@@ -134,7 +161,6 @@ export default function Home() {
                   const endTime = new Date(point.logging_time);
                   const durationMin = (endTime.getTime() - startTime.getTime()) / 60000;
                   
-                  // Check if stop > 15 seconds (0.25 min)
                   if (durationMin > 0.25) { 
                       stoppages.push({
                           location: stopStart.location || `GPS Near ${stopStart.latitude.toFixed(4)}`,
@@ -143,8 +169,8 @@ export default function Home() {
                           durationMin: Number(durationMin.toFixed(1))
                       });
                       
-                      // Likely a BPT if stop was significant (>1 min)
-                      if (durationMin > 1) {
+                      // BPT Detection (If stopped > 1 min)
+                      if (durationMin > 1.0) {
                           brakeTests.push({
                               type: 'BPT',
                               status: 'proper', 
@@ -159,21 +185,24 @@ export default function Home() {
               }
           }
 
-          // BFT Logic (Running)
+          // --- 2. BFT Logic (Running Test) ---
           if (i > 0) {
               const prev = sorted[i-1];
-              if (prev.speed_kmph > 20 && speed < prev.speed_kmph) {
+              // Speed dropping sequence
+              if (prev.speed_kmph > 15 && speed < prev.speed_kmph) {
                   if (!speedDropStart) speedDropStart = prev;
               } 
+              // Speed recovering sequence
               else if (speed > prev.speed_kmph && speedDropStart) {
                    const drop = speedDropStart.speed_kmph - prev.speed_kmph;
-                   if (drop > 8 && prev.speed_kmph > 10) {
+                   // Logic: Drop > 10kmph, did not stop (min speed > 5), then recovered
+                   if (drop >= 10 && prev.speed_kmph > 5) {
                        brakeTests.push({
                            type: 'BFT',
                            status: 'proper',
                            testSpeed: Math.round(speedDropStart.speed_kmph),
                            finalSpeed: Math.round(prev.speed_kmph),
-                           location: speedDropStart.location,
+                           location: speedDropStart.location || "Running Section",
                            timestamp: speedDropStart.logging_time
                        });
                    }
@@ -207,10 +236,10 @@ export default function Home() {
             if (filteredGps.length === 0) throw new Error("Time filter removed all points.");
         }
 
-        // Calculate Stops on RAW filtered data
+        // --- Calculate Halts & Brake Tests ---
         const { stoppages, brakeTests } = analyzeHaltsAndBrakeTests(filteredGps);
 
-        // Filter One Point Per Mast for Map/Graph
+        // --- Reduce Data (One Point Per OHE) ---
         let finalDisplayData = [];
         if (oheData.length > 0) {
             const oheMatches = new Map<string, any>(); 
@@ -229,7 +258,7 @@ export default function Home() {
                     if (!existingBest || minD < existingBest.distanceToMast) {
                         oheMatches.set(nearestOhe.location, { 
                             ...gps, 
-                            location: nearestOhe.location, 
+                            location: nearestOhe.location, // Snap GPS name to Mast
                             matched: true,
                             distanceToMast: minD 
                         });
@@ -244,17 +273,27 @@ export default function Home() {
         // Sort by Time
         finalDisplayData.sort((a,b) => new Date(a.logging_time).getTime() - new Date(b.logging_time).getTime());
 
-        // Limits Logic
+        // --- Apply Limits (Caution Orders & Violations) ---
         finalDisplayData = finalDisplayData.map(point => {
             let limit = globalMPS;
             let status = 'ok';
+
+            // 1. Caution Order Logic (Range Based)
             for (const co of cautionOrders) {
-                if (point.location === co.startOhe || point.location === co.endOhe) limit = co.speedLimit;
+                // If point has a mapped OHE location, check if it falls in range
+                if (point.location && co.startOhe && co.endOhe) {
+                    if (isLocationInCautionRange(point.location, co.startOhe, co.endOhe)) {
+                        limit = co.speedLimit;
+                    }
+                }
             }
+
+            // 2. Violation Logic (MPS+4 Rule)
             const speed = point.speed_kmph;
             if (speed <= limit) status = 'ok';
             else if (speed < limit + 4) status = 'warning';
             else status = 'violation';
+
             return { ...point, limit_applied: limit, status, source: 'GPS' };
         });
 
@@ -293,13 +332,55 @@ export default function Home() {
         <div className="grid gap-6 lg:grid-cols-[400px_1fr]">
           <div className="space-y-6">
             <Card className="p-6 shadow-md">
-                <div className="space-y-4">
+                <div className="space-y-4 border-b pb-4">
                   <h3 className="font-semibold text-sm">Data Sources</h3>
-                  <Input key={rtisFile ? "gps-loaded" : "gps-empty"} type="file" accept=".csv" onChange={handleFileUpload(setRtisFile, "RTIS")} />
-                  <Input key={oheFile ? "ohe-loaded" : "ohe-empty"} type="file" accept=".csv" onChange={handleFileUpload(setOheFile, "OHE")} />
-                  <Input key={signalsFile ? "sig-loaded" : "sig-empty"} type="file" accept=".csv" onChange={handleFileUpload(setSignalsFile, "Signal")} />
+                  <div className="space-y-2">
+                    <Label className="text-xs">RTIS Data (GPS) *</Label>
+                    <Input key={rtisFile ? "gps-ok" : "gps-no"} type="file" accept=".csv" onChange={handleFileUpload(setRtisFile, "RTIS")} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs">OHE Data (Master)</Label>
+                    <Input key={oheFile ? "ohe-ok" : "ohe-no"} type="file" accept=".csv" onChange={handleFileUpload(setOheFile, "OHE")} />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs">Signal Data</Label>
+                    <Input key={signalsFile ? "sig-ok" : "sig-no"} type="file" accept=".csv" onChange={handleFileUpload(setSignalsFile, "Signal")} />
+                  </div>
                 </div>
-                {/* ... Config Section same as before ... */}
+
+                <div className="space-y-4 border-b pb-4">
+                  <h3 className="font-semibold text-sm">Configuration</h3>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div><Label className="text-xs">Departure Time</Label><Input type="datetime-local" step="60" value={departureTime} onChange={(e) => setDepartureTime(e.target.value)} className="text-xs"/></div>
+                    <div><Label className="text-xs">Arrival Time</Label><Input type="datetime-local" step="60" value={arrivalTime} onChange={(e) => setArrivalTime(e.target.value)} className="text-xs"/></div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                      <div><Label className="text-xs">MPS (km/h)</Label><Input type="number" value={globalMPS} onChange={(e) => setGlobalMPS(Number(e.target.value))} /></div>
+                      <div><Label className="text-xs">Match Dist (m)</Label><Input type="number" value={maxDistance} onChange={(e) => setMaxDistance(Number(e.target.value))} /></div>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <div className="flex justify-between items-center"><h3 className="font-semibold text-sm">Caution Orders</h3><span className="text-xs bg-muted px-2 py-0.5 rounded">{cautionOrders.length} Active</span></div>
+                  <div className="grid grid-cols-[1fr_1fr_0.7fr] gap-2">
+                    <Input placeholder="Start (e.g. 755/10)" className="text-xs" value={newCO.startOhe} onChange={(e) => setNewCO({...newCO, startOhe: e.target.value})} />
+                    <Input placeholder="End (e.g. 755/12)" className="text-xs" value={newCO.endOhe} onChange={(e) => setNewCO({...newCO, endOhe: e.target.value})} />
+                    <Input placeholder="Kmph" type="number" className="text-xs" value={newCO.speedLimit || ''} onChange={(e) => setNewCO({...newCO, speedLimit: Number(e.target.value)})} />
+                  </div>
+                  <Button variant="secondary" size="sm" onClick={handleAddCO} className="w-full h-8 text-xs"><Plus className="mr-2 h-3 w-3"/> Add</Button>
+                  
+                  {cautionOrders.length > 0 && (
+                      <div className="max-h-32 overflow-y-auto space-y-2 border rounded p-2 bg-muted/20">
+                          {cautionOrders.map((co, idx) => (
+                              <div key={idx} className="flex justify-between text-xs bg-background p-2 rounded border shadow-sm">
+                                  <span className="font-mono">{co.startOhe} ➔ {co.endOhe}</span>
+                                  <div className="flex items-center gap-2"><span className="font-bold text-orange-600 bg-orange-50 px-1.5 rounded">{co.speedLimit}</span><Trash2 className="h-3 w-3 cursor-pointer text-muted-foreground hover:text-destructive" onClick={() => handleRemoveCO(idx)} /></div>
+                              </div>
+                          ))}
+                      </div>
+                  )}
+                </div>
+
                 <div className="pt-4"><Button onClick={runIntegratedAnalysis} disabled={!canAnalyze || isProcessing} className="w-full">{isProcessing ? "Processing..." : "Run Analysis"}</Button></div>
                 {status.type !== 'idle' && <div className={`text-xs p-2 rounded ${status.type==='error'?'bg-red-100 text-red-700':'bg-green-100 text-green-700'}`}>{status.message}</div>}
             </Card>

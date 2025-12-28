@@ -19,8 +19,6 @@ export interface CautionOrder {
 }
 
 // --- HELPERS ---
-
-// Convert "755/10" -> 755.10 for range comparison
 const parseMastToNumber = (mast: string): number => {
     if (!mast) return 0;
     const parts = mast.split('/');
@@ -30,15 +28,11 @@ const parseMastToNumber = (mast: string): number => {
     return parseFloat(mast) || 0;
 };
 
-// Check if a location falls within a caution order range
 const isLocationInCautionRange = (currentLoc: string, startLoc: string, endLoc: string): boolean => {
     const current = parseMastToNumber(currentLoc);
     const start = parseMastToNumber(startLoc);
     const end = parseMastToNumber(endLoc);
-    
     if (current === 0 || start === 0 || end === 0) return false;
-    
-    // Handle both ascending and descending directions
     return (current >= Math.min(start, end)) && (current <= Math.max(start, end));
 };
 
@@ -140,11 +134,23 @@ export default function Home() {
 
   const handleRemoveCO = (index: number) => setCautionOrders(cautionOrders.filter((_, i) => i !== index));
 
-  const analyzeHaltsAndBrakeTests = (data: any[]) => {
+  // --- REVISED: ONE-TIME BRAKE TEST & HALT LOGIC ---
+  const analyzeHaltsAndBrakeTests = (data: any[], trainType: TrainType) => {
       const stoppages = [];
       const brakeTests = [];
       let stopStart: any = null;
-      let speedDropStart: any = null;
+      
+      // BFT Variables (One-time check)
+      let bftFound = false;
+      let bftPotentialStart: any = null;
+
+      // BPT Variables (One-time check)
+      let bptFound = false;
+      let bptPotentialStart: any = null;
+      
+      // BPT Parameters based on Train Type
+      const bptMinSpeed = trainType === 'passenger' ? 60 : 40;
+      const bptMaxSpeed = trainType === 'passenger' ? 70 : 50;
 
       const sorted = [...data].sort((a,b) => new Date(a.logging_time).getTime() - new Date(b.logging_time).getTime());
 
@@ -152,7 +158,7 @@ export default function Home() {
           const point = sorted[i];
           const speed = point.speed_kmph;
 
-          // --- 1. Halt & BPT Logic ---
+          // --- 1. Halt Detection (> 15 sec) ---
           if (speed < 5) { // Relaxed stop threshold
               if (!stopStart) stopStart = point;
           } else {
@@ -168,45 +174,60 @@ export default function Home() {
                           departureTime: point.logging_time,
                           durationMin: Number(durationMin.toFixed(1))
                       });
-                      
-                      // BPT Detection (If stopped > 1 min)
-                      if (durationMin > 1.0) {
-                          brakeTests.push({
-                              type: 'BPT',
-                              status: 'proper', 
-                              testSpeed: 0,
-                              finalSpeed: 0,
-                              location: stopStart.location || `Near ${stopStart.latitude.toFixed(4)}`,
-                              timestamp: stopStart.logging_time
-                          });
-                      }
                   }
                   stopStart = null;
               }
           }
 
-          // --- 2. BFT Logic (Running Test) ---
-          if (i > 0) {
-              const prev = sorted[i-1];
-              // Speed dropping sequence
-              if (prev.speed_kmph > 15 && speed < prev.speed_kmph) {
-                  if (!speedDropStart) speedDropStart = prev;
-              } 
-              // Speed recovering sequence
-              else if (speed > prev.speed_kmph && speedDropStart) {
-                   const drop = speedDropStart.speed_kmph - prev.speed_kmph;
-                   // Logic: Drop > 10kmph, did not stop (min speed > 5), then recovered
-                   if (drop >= 10 && prev.speed_kmph > 5) {
+          // --- 2. BFT Detection (First time 15kmph reached) ---
+          // Rule: Check only ONCE (first valid occurrence)
+          if (!bftFound) {
+              if (speed >= 15 && !bftPotentialStart) {
+                  // Reached 15kmph, start monitoring for drop
+                  bftPotentialStart = point; 
+              } else if (bftPotentialStart) {
+                  // We have started, now look for drop to ~10kmph (e.g., drop > 4kmph)
+                  if (speed <= 11 && speed > 2) { 
+                      // Success: Speed dropped to near 10 kmph without stopping
+                      brakeTests.push({
+                          type: 'BFT',
+                          status: 'proper',
+                          testSpeed: Math.round(bftPotentialStart.speed_kmph),
+                          finalSpeed: Math.round(speed),
+                          location: bftPotentialStart.location || "Start Section",
+                          timestamp: bftPotentialStart.logging_time
+                      });
+                      bftFound = true; // Mark done
+                  } else if (speed > 20) {
+                      // Accelerated too much without testing, invalid start attempt
+                      bftPotentialStart = null; 
+                  }
+              }
+          }
+
+          // --- 3. BPT Detection (First time target speed reached) ---
+          // Rule: Check only ONCE
+          if (!bptFound) {
+              if (speed >= bptMinSpeed && speed <= bptMaxSpeed && !bptPotentialStart) {
+                  // Entered target speed zone (e.g. 60-70 for Passenger)
+                  bptPotentialStart = point;
+              } else if (bptPotentialStart) {
+                  const drop = bptPotentialStart.speed_kmph - speed;
+                  // Rule: Speed should drop by ~20-30 kmph
+                  if (drop >= 20) {
                        brakeTests.push({
-                           type: 'BFT',
+                           type: 'BPT',
                            status: 'proper',
-                           testSpeed: Math.round(speedDropStart.speed_kmph),
-                           finalSpeed: Math.round(prev.speed_kmph),
-                           location: speedDropStart.location || "Running Section",
-                           timestamp: speedDropStart.logging_time
+                           testSpeed: Math.round(bptPotentialStart.speed_kmph),
+                           finalSpeed: Math.round(speed),
+                           location: bptPotentialStart.location || "Block Section",
+                           timestamp: bptPotentialStart.logging_time
                        });
-                   }
-                   speedDropStart = null;
+                       bptFound = true; // Mark done
+                  } else if (speed > bptMaxSpeed + 5) {
+                      // Speed increased instead of dropping, reset search
+                      bptPotentialStart = null;
+                  }
               }
           }
       }
@@ -237,7 +258,7 @@ export default function Home() {
         }
 
         // --- Calculate Halts & Brake Tests ---
-        const { stoppages, brakeTests } = analyzeHaltsAndBrakeTests(filteredGps);
+        const { stoppages, brakeTests } = analyzeHaltsAndBrakeTests(filteredGps, trainType);
 
         // --- Reduce Data (One Point Per OHE) ---
         let finalDisplayData = [];
@@ -280,7 +301,6 @@ export default function Home() {
 
             // 1. Caution Order Logic (Range Based)
             for (const co of cautionOrders) {
-                // If point has a mapped OHE location, check if it falls in range
                 if (point.location && co.startOhe && co.endOhe) {
                     if (isLocationInCautionRange(point.location, co.startOhe, co.endOhe)) {
                         limit = co.speedLimit;
@@ -353,6 +373,13 @@ export default function Home() {
                   <div className="grid grid-cols-2 gap-3">
                     <div><Label className="text-xs">Departure Time</Label><Input type="datetime-local" step="60" value={departureTime} onChange={(e) => setDepartureTime(e.target.value)} className="text-xs"/></div>
                     <div><Label className="text-xs">Arrival Time</Label><Input type="datetime-local" step="60" value={arrivalTime} onChange={(e) => setArrivalTime(e.target.value)} className="text-xs"/></div>
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs">Train Type</Label>
+                    <div className="grid grid-cols-2 gap-2">
+                        <div onClick={() => setTrainType('passenger')} className={`cursor-pointer border rounded-md p-2 flex items-center justify-center gap-2 text-xs transition-colors ${trainType === 'passenger' ? 'bg-primary/10 border-primary text-primary font-bold' : 'hover:bg-muted'}`}><TrainFront className="h-4 w-4" /> Passenger</div>
+                        <div onClick={() => setTrainType('goods')} className={`cursor-pointer border rounded-md p-2 flex items-center justify-center gap-2 text-xs transition-colors ${trainType === 'goods' ? 'bg-primary/10 border-primary text-primary font-bold' : 'hover:bg-muted'}`}><Truck className="h-4 w-4" /> Goods</div>
+                    </div>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
                       <div><Label className="text-xs">MPS (km/h)</Label><Input type="number" value={globalMPS} onChange={(e) => setGlobalMPS(Number(e.target.value))} /></div>

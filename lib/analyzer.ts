@@ -1,6 +1,6 @@
 import Papa from 'papaparse';
 
-// --- 1. EXPORTED TYPES ---
+// --- 1. EXPORTED TYPES (The Single Source of Truth) ---
 export interface CautionOrder {
   startOhe: string;
   endOhe: string;
@@ -195,6 +195,7 @@ export async function analyzeData(
   arrivalTime?: string
 ): Promise<{ summary: AnalysisSummary; results: AnalysisResult[]; signals: AnalysisResult[] }> {
   
+  // A. Parse
   const rtisContent = await rtisFile.text();
   const rtisDataRaw = parseCSV(rtisContent);
   const oheContent = oheFile ? await oheFile.text() : "";
@@ -217,7 +218,7 @@ export async function analyzeData(
 
   if (!masterLatCol || !masterLonCol) throw new Error("Master file missing Latitude/Longitude columns");
 
-  // Master Grid
+  // B. Master Grids
   const masterGrid = new GridIndex(0.01);
   const oheLocationMap = new Map<string, {lat: number, lon: number}>(); 
   masterDataRaw.forEach((row, idx) => {
@@ -231,7 +232,6 @@ export async function analyzeData(
       }
   });
 
-  // Signal Grid & List
   const signalGrid = new GridIndex(0.01);
   let signalDataList: Array<{lat: number, lon: number, name: string}> = [];
   if (signalsDataRaw.length > 0) {
@@ -280,7 +280,7 @@ export async function analyzeData(
       return { found: bestDist < 100, name: bestName };
   };
 
-  // Prepare RTIS
+  // C. RTIS Data Prep
   const depTimeMs = departureTime ? new Date(departureTime).getTime() : 0;
   const arrTimeMs = arrivalTime ? new Date(arrivalTime).getTime() : Infinity;
 
@@ -299,7 +299,7 @@ export async function analyzeData(
     .filter(p => p.time.getTime() >= depTimeMs && p.time.getTime() <= arrTimeMs)
     .sort((a, b) => a.time.getTime() - b.time.getTime());
 
-  // Matching
+  // D. Matching
   const rtisMatchGrid = new GridIndex(0.01);
   rtisCleaned.forEach(p => rtisMatchGrid.insert(p.idx, p.lat, p.lon));
 
@@ -362,12 +362,11 @@ export async function analyzeData(
      }
   }
 
-  // Valid Section Data
+  // E. Valid Section
   const validSectionData = (firstMatchedRtisIndex !== Infinity && lastMatchedRtisIndex !== -1)
       ? rtisCleaned.filter(p => p.idx >= firstMatchedRtisIndex && p.idx <= lastMatchedRtisIndex)
       : [];
 
-  // Brake Tests
   const brakeTests: BrakeTestResult[] = [];
   if (validSectionData.length > 0) {
       const startLoc = validSectionData[0];
@@ -378,7 +377,7 @@ export async function analyzeData(
           brakeTests.push({ type: 'BFT', status: 'not_performed', startSpeed: entrySpeed, lowestSpeed: entrySpeed, dropAmount: 0, location: findNearestLocation(startLoc.lat, startLoc.lon), timestamp: startLoc.timeStr, details: detail });
           brakeTests.push({ type: 'BPT', status: 'not_performed', startSpeed: entrySpeed, lowestSpeed: entrySpeed, dropAmount: 0, location: findNearestLocation(startLoc.lat, startLoc.lon), timestamp: startLoc.timeStr, details: detail });
       } else {
-          // BFT Logic
+          // BFT: 15 -> 10
           let bftResult: BrakeTestResult | null = null;
           let bftFailed = false;
           for (let i = 0; i < validSectionData.length - 1; i++) {
@@ -393,7 +392,7 @@ export async function analyzeData(
                       if (validSectionData[j].speed < minSpeed) minSpeed = validSectionData[j].speed;
                   }
                   if (minSpeed <= 11) {
-                      bftResult = { type: 'BFT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "Speed dropped to ~10 kmph" };
+                      bftResult = { type: 'BFT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "Dropped to ~10 kmph" };
                       break; 
                   }
               }
@@ -467,7 +466,7 @@ export async function analyzeData(
           if (dist > 100) break; 
           if (p.speed > 15) { haltViolations.push({ haltLocation: stop.location, checkpoint: '100m Approach', limit: 15, actualSpeed: p.speed, timestamp: p.timeStr }); break; }
       }
-      // 2. Previous Signals Check
+      // 2. Previous Signals
       const sigHistoryIdx = signalHistory.findIndex(s => s.location === stop.location && new Date(s.logging_time).getTime() <= new Date(stop.arrivalTime).getTime());
       if (sigHistoryIdx !== -1) {
           if (sigHistoryIdx > 0) {

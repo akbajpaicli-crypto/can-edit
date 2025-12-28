@@ -3,13 +3,12 @@
 import { useEffect, useRef } from "react"
 import L from "leaflet"
 
-// --- Types ---
 interface MapPoint {
   location: string;
   latitude?: number;
   longitude?: number;
-  lat?: number; // Handle variations
-  lng?: number; // Handle variations
+  lat?: number; 
+  lng?: number;
   speed_kmph?: number | null;
   limit_applied?: number | null;
   status?: 'ok' | 'warning' | 'violation';
@@ -28,34 +27,27 @@ export function MapContainer({ data = [], signals = [] }: MapContainerProps) {
   const mapInstanceRef = useRef<L.Map | null>(null)
 
   useEffect(() => {
-    // 1. Safety Checks
     if (typeof window === "undefined" || !mapRef.current) return
 
-    // 2. Normalize Data (Handle 'lat' vs 'latitude' and ensure valid arrays)
+    // Normalize Data
     const normalize = (items: any[], defaultSource: string) => {
         if (!Array.isArray(items)) return [];
         return items.map(p => ({
             ...p,
-            // Coalesce coordinate keys
             latitude: Number(p.latitude ?? p.lat),
             longitude: Number(p.longitude ?? p.lng),
             source: p.source || defaultSource,
             status: p.status || 'ok'
-        })).filter(p => 
-            !isNaN(p.latitude) && 
-            !isNaN(p.longitude) && 
-            p.latitude !== 0 && 
-            p.longitude !== 0
-        );
+        })).filter(p => !isNaN(p.latitude) && !isNaN(p.longitude));
     };
 
     const safePoints = [
-        ...normalize(data, 'OHE'), 
-        ...normalize(signals, 'Signal')
+        ...normalize(signals, 'Signal'), // Plot signals first (bottom layer)
+        ...normalize(data, 'OHE')        // Plot OHE/GPS on top
     ];
 
     const loadMap = async () => {
-      // 3. Load Leaflet CSS/JS (Lazy)
+      // Load Leaflet resources if missing
       if (!document.querySelector('link[href*="leaflet.css"]')) {
         const link = document.createElement("link")
         link.rel = "stylesheet"
@@ -76,13 +68,12 @@ export function MapContainer({ data = [], signals = [] }: MapContainerProps) {
       const L = (window as any).L
       if (!mapRef.current) return
       
-      // 4. Initialize/Reset Map
       if (mapInstanceRef.current) {
         mapInstanceRef.current.remove()
         mapInstanceRef.current = null
       }
 
-      const map = L.map(mapRef.current).setView([23.17, 79.94], 8) // Default Center (Jabalpur area approx)
+      const map = L.map(mapRef.current).setView([23.17, 79.94], 8)
       mapInstanceRef.current = map
 
       L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -99,11 +90,11 @@ export function MapContainer({ data = [], signals = [] }: MapContainerProps) {
         html: `
           <div style="position: relative; width: 24px; height: 24px; filter: drop-shadow(0 2px 2px rgba(0,0,0,0.5));">
             <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                <path d="M12 2L12 22" stroke="#374151" stroke-width="2" stroke-linecap="round"/>
-                <rect x="8" y="2" width="8" height="14" rx="2" fill="#1f2937" stroke="#9ca3af" stroke-width="1"/>
-                <circle cx="12" cy="5" r="1.5" fill="#ef4444"/>
-                <circle cx="12" cy="9" r="1.5" fill="#eab308"/>
-                <circle cx="12" cy="13" r="1.5" fill="#22c55e"/>
+                <rect x="10" y="2" width="4" height="20" fill="#374151" />
+                <rect x="6" y="2" width="12" height="16" rx="2" fill="#1f2937" stroke="#f3f4f6" stroke-width="1"/>
+                <circle cx="12" cy="6" r="2" fill="#ef4444"/>
+                <circle cx="12" cy="10" r="2" fill="#eab308"/>
+                <circle cx="12" cy="14" r="2" fill="#22c55e"/>
             </svg>
           </div>`,
         className: "", iconSize: [24, 24], iconAnchor: [12, 24], popupAnchor: [0, -24]
@@ -118,7 +109,6 @@ export function MapContainer({ data = [], signals = [] }: MapContainerProps) {
         className: "", iconSize: [12, 12], iconAnchor: [6, 6]
       })
 
-      // --- Plotting ---
       const bounds = L.latLngBounds([])
       let validCount = 0;
 
@@ -133,20 +123,29 @@ export function MapContainer({ data = [], signals = [] }: MapContainerProps) {
             icon = signalIcon;
             zIndex = 500;
         } else if (point.matched) {
-            icon = createOheIcon("#16a34a"); // Green
+            icon = createOheIcon("#16a34a"); 
         } else {
-            icon = createOheIcon("#94a3b8"); // Gray
+            icon = createOheIcon("#94a3b8"); 
         }
 
-        L.marker([point.latitude!, point.longitude!], { icon, zIndexOffset: zIndex })
-         .addTo(map)
-         .bindPopup(`
+        const marker = L.marker([point.latitude!, point.longitude!], { icon, zIndexOffset: zIndex })
+         .addTo(map);
+
+        // --- HOVER TOOLTIP (Added) ---
+        // Shows name on hover, permanently if requested, or just mouseover
+        marker.bindTooltip(
+            `<b>${point.location}</b>${point.speed_kmph ? ` (${Math.round(point.speed_kmph)} km/h)` : ''}`, 
+            { direction: 'top', offset: [0, -10], opacity: 0.9 }
+        );
+
+        // Click Popup
+        marker.bindPopup(`
             <div class="text-xs font-sans">
-                <strong class="block mb-1">${point.location}</strong>
-                <span class="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600 font-semibold text-[10px]">${point.source}</span>
-                ${point.speed_kmph ? `<div class="mt-2">Speed: <strong>${Math.round(point.speed_kmph)} km/h</strong></div>` : ''}
-                ${point.limit_applied ? `<div>Limit: ${point.limit_applied} km/h</div>` : ''}
-                ${point.logging_time ? `<div class="text-gray-400 mt-1">${point.logging_time.split(' ')[1]}</div>` : ''}
+                <strong class="block mb-1 text-sm">${point.location}</strong>
+                <span class="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-semibold text-[10px] uppercase border border-slate-200">${point.source}</span>
+                ${point.speed_kmph ? `<div class="mt-2 text-slate-700">Speed: <strong>${Math.round(point.speed_kmph)} km/h</strong></div>` : ''}
+                ${point.limit_applied ? `<div class="text-slate-700">Limit: ${point.limit_applied} km/h</div>` : ''}
+                ${point.logging_time ? `<div class="text-slate-400 mt-1">${point.logging_time.split('T')[1]?.split('.')[0]}</div>` : ''}
             </div>
          `);
 
@@ -170,7 +169,7 @@ export function MapContainer({ data = [], signals = [] }: MapContainerProps) {
   }, [data, signals])
 
   return (
-    <div className="relative h-[500px] w-full bg-muted rounded-md overflow-hidden border">
+    <div className="relative h-[500px] w-full bg-slate-100 rounded-md overflow-hidden border border-slate-200">
       <div ref={mapRef} className="h-full w-full" style={{ zIndex: 0 }} />
     </div>
   )

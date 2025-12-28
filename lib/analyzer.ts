@@ -1,6 +1,6 @@
 import Papa from 'papaparse';
 
-// --- 1. EXPORTED INTERFACES (Used by other files) ---
+// --- 1. EXPORTED TYPES ---
 export interface CautionOrder {
   startOhe: string;
   endOhe: string;
@@ -182,7 +182,7 @@ function findColumn(data: Array<Record<string, string>>, names: string[]): strin
   return null;
 }
 
-// --- 3. CORE ANALYZER FUNCTION ---
+// --- 3. CORE ANALYZER ---
 export async function analyzeData(
   rtisFile: File,
   oheFile: File | null, 
@@ -195,7 +195,6 @@ export async function analyzeData(
   arrivalTime?: string
 ): Promise<{ summary: AnalysisSummary; results: AnalysisResult[]; signals: AnalysisResult[] }> {
   
-  // A. Parse Inputs
   const rtisContent = await rtisFile.text();
   const rtisDataRaw = parseCSV(rtisContent);
   const oheContent = oheFile ? await oheFile.text() : "";
@@ -218,7 +217,7 @@ export async function analyzeData(
 
   if (!masterLatCol || !masterLonCol) throw new Error("Master file missing Latitude/Longitude columns");
 
-  // B. Master Grid
+  // Master Grid
   const masterGrid = new GridIndex(0.01);
   const oheLocationMap = new Map<string, {lat: number, lon: number}>(); 
   masterDataRaw.forEach((row, idx) => {
@@ -232,6 +231,7 @@ export async function analyzeData(
       }
   });
 
+  // Signal Grid & List
   const signalGrid = new GridIndex(0.01);
   let signalDataList: Array<{lat: number, lon: number, name: string}> = [];
   if (signalsDataRaw.length > 0) {
@@ -280,7 +280,7 @@ export async function analyzeData(
       return { found: bestDist < 100, name: bestName };
   };
 
-  // C. Prepare RTIS
+  // Prepare RTIS
   const depTimeMs = departureTime ? new Date(departureTime).getTime() : 0;
   const arrTimeMs = arrivalTime ? new Date(arrivalTime).getTime() : Infinity;
 
@@ -299,7 +299,7 @@ export async function analyzeData(
     .filter(p => p.time.getTime() >= depTimeMs && p.time.getTime() <= arrTimeMs)
     .sort((a, b) => a.time.getTime() - b.time.getTime());
 
-  // D. Matching
+  // Matching
   const rtisMatchGrid = new GridIndex(0.01);
   rtisCleaned.forEach(p => rtisMatchGrid.insert(p.idx, p.lat, p.lon));
 
@@ -362,11 +362,12 @@ export async function analyzeData(
      }
   }
 
-  // E. Valid Section & Logic
+  // Valid Section Data
   const validSectionData = (firstMatchedRtisIndex !== Infinity && lastMatchedRtisIndex !== -1)
       ? rtisCleaned.filter(p => p.idx >= firstMatchedRtisIndex && p.idx <= lastMatchedRtisIndex)
       : [];
 
+  // Brake Tests
   const brakeTests: BrakeTestResult[] = [];
   if (validSectionData.length > 0) {
       const startLoc = validSectionData[0];
@@ -377,13 +378,14 @@ export async function analyzeData(
           brakeTests.push({ type: 'BFT', status: 'not_performed', startSpeed: entrySpeed, lowestSpeed: entrySpeed, dropAmount: 0, location: findNearestLocation(startLoc.lat, startLoc.lon), timestamp: startLoc.timeStr, details: detail });
           brakeTests.push({ type: 'BPT', status: 'not_performed', startSpeed: entrySpeed, lowestSpeed: entrySpeed, dropAmount: 0, location: findNearestLocation(startLoc.lat, startLoc.lon), timestamp: startLoc.timeStr, details: detail });
       } else {
-          // BFT
+          // BFT Logic
           let bftResult: BrakeTestResult | null = null;
+          let bftFailed = false;
           for (let i = 0; i < validSectionData.length - 1; i++) {
               const p = validSectionData[i];
               if (p.speed > 15) {
                   bftResult = { type: 'BFT', status: 'improper', startSpeed: p.speed, lowestSpeed: p.speed, dropAmount: 0, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "Crossed 15kmph without test" };
-                  break; 
+                  bftFailed = true; break; 
               }
               if (p.speed >= 10 && p.speed <= 15) {
                   let minSpeed = p.speed;
@@ -391,15 +393,15 @@ export async function analyzeData(
                       if (validSectionData[j].speed < minSpeed) minSpeed = validSectionData[j].speed;
                   }
                   if (minSpeed <= 11) {
-                      bftResult = { type: 'BFT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "Dropped to ~10 kmph" };
+                      bftResult = { type: 'BFT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "Speed dropped to ~10 kmph" };
                       break; 
                   }
               }
           }
           if(bftResult) brakeTests.push(bftResult);
-          else brakeTests.push({ type: 'BFT', status: 'not_performed', startSpeed: 0, lowestSpeed: 0, dropAmount: 0, location: "-", timestamp: "-", details: "No valid test window" });
+          else if (!bftFailed) brakeTests.push({ type: 'BFT', status: 'not_performed', startSpeed: 0, lowestSpeed: 0, dropAmount: 0, location: "-", timestamp: "-", details: "No valid test window" });
 
-          // BPT
+          // BPT Logic
           const minStart = trainType === 'passenger' ? 60 : 40;
           const maxStart = trainType === 'passenger' ? 70 : 50;
           const reqDropMin = trainType === 'passenger' ? 30 : 20;
@@ -457,6 +459,7 @@ export async function analyzeData(
       if (!stop.isSignal) return;
       const stopIdx = stoppageSource.findIndex(p => p.timeStr === stop.arrivalTime);
       if (stopIdx === -1) return;
+      
       // 1. 100m check
       for (let i = stopIdx - 1; i >= 0; i--) {
           const p = stoppageSource[i];
@@ -464,7 +467,7 @@ export async function analyzeData(
           if (dist > 100) break; 
           if (p.speed > 15) { haltViolations.push({ haltLocation: stop.location, checkpoint: '100m Approach', limit: 15, actualSpeed: p.speed, timestamp: p.timeStr }); break; }
       }
-      // 2. Previous Signals
+      // 2. Previous Signals Check
       const sigHistoryIdx = signalHistory.findIndex(s => s.location === stop.location && new Date(s.logging_time).getTime() <= new Date(stop.arrivalTime).getTime());
       if (sigHistoryIdx !== -1) {
           if (sigHistoryIdx > 0) {

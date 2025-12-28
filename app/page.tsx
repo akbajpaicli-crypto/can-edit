@@ -19,7 +19,6 @@ export default function Home() {
   const [globalMPS, setGlobalMPS] = useState<number>(110)
   const [trainType, setTrainType] = useState<TrainType>('passenger')
   
-  // NEW: Time Window State
   const [depTime, setDepTime] = useState<string>("")
   const [arrTime, setArrTime] = useState<string>("")
   
@@ -35,11 +34,9 @@ export default function Home() {
 
   const handleFileUpload = (setter: (f: File | null) => void, label: string) => (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
-    if (file && (file.name.endsWith(".csv") || file.name.endsWith(".xlsx"))) {
-        setter(file)
-        setStatus({ type: "idle", message: `${label} file uploaded` })
-    } else {
-        setStatus({ type: "error", message: `Error: Invalid file format for ${label}. Use CSV.` })
+    if (file) {
+      setter(file)
+      setStatus({ type: "idle", message: `${label} file uploaded` })
     }
   }
 
@@ -64,17 +61,17 @@ export default function Home() {
     setStatus({ type: "processing", message: "Processing..." })
 
     try {
-      // Pass the new time arguments
       const data = await analyzeData(
           rtisFile, oheFile, signalsFile, 
           maxDistance, globalMPS, cautionOrders, trainType,
-          depTime, arrTime // <--- Passed here
+          depTime, arrTime
       )
       setResults(data)
       setStatus({ type: "success", message: `Success! Processed ${data.summary.total_structures} locations.` })
     } catch (error) {
       console.error(error)
-      setStatus({ type: "error", message: "Analysis failed." })
+      const msg = error instanceof Error ? error.message : "Unknown error";
+      setStatus({ type: "error", message: `Analysis failed: ${msg}` })
     } finally {
       setIsProcessing(false)
     }
@@ -108,9 +105,9 @@ export default function Home() {
                 <div className="space-y-4 border-b pb-4">
                   <h3 className="font-semibold text-sm flex items-center gap-2"><Upload className="h-4 w-4"/> Data Sources</h3>
                   <div className="space-y-3">
-                    <Input type="file" accept=".csv" onChange={handleFileUpload(setRtisFile, "RTIS")} className="cursor-pointer bg-muted/50"/>
-                    <Input type="file" accept=".csv" onChange={handleFileUpload(setOheFile, "OHE")} className="cursor-pointer bg-muted/50"/>
-                    <Input type="file" accept=".csv" onChange={handleFileUpload(setSignalsFile, "Signal")} className="cursor-pointer bg-muted/50"/>
+                    <div className="space-y-1"><Label className="text-xs font-medium">RTIS Data (GPS)</Label><Input type="file" accept=".csv" onChange={handleFileUpload(setRtisFile, "RTIS")} className="cursor-pointer bg-muted/50"/></div>
+                    <div className="space-y-1"><Label className="text-xs font-medium">OHE Data (Master)</Label><Input type="file" accept=".csv" onChange={handleFileUpload(setOheFile, "OHE")} className="cursor-pointer bg-muted/50"/></div>
+                    <div className="space-y-1"><Label className="text-xs font-medium">Signal Data (Optional)</Label><Input type="file" accept=".csv" onChange={handleFileUpload(setSignalsFile, "Signal")} className="cursor-pointer bg-muted/50"/></div>
                   </div>
                 </div>
 
@@ -118,31 +115,19 @@ export default function Home() {
                 <div className="space-y-4 border-b pb-4">
                   <h3 className="font-semibold text-sm">Configuration</h3>
                   
-                  {/* Train Type */}
                   <div className="space-y-2">
                     <Label className="text-xs">Train Type</Label>
                     <div className="grid grid-cols-2 gap-2">
-                        <div onClick={() => setTrainType('passenger')} className={`cursor-pointer border rounded-md p-2 flex items-center justify-center gap-2 text-xs transition-colors ${trainType === 'passenger' ? 'bg-primary/10 border-primary text-primary font-bold' : 'hover:bg-muted'}`}>
-                            <TrainFront className="h-4 w-4" /> Passenger
-                        </div>
-                        <div onClick={() => setTrainType('goods')} className={`cursor-pointer border rounded-md p-2 flex items-center justify-center gap-2 text-xs transition-colors ${trainType === 'goods' ? 'bg-primary/10 border-primary text-primary font-bold' : 'hover:bg-muted'}`}>
-                            <Truck className="h-4 w-4" /> Goods
-                        </div>
+                        <div onClick={() => setTrainType('passenger')} className={`cursor-pointer border rounded-md p-2 flex items-center justify-center gap-2 text-xs transition-colors ${trainType === 'passenger' ? 'bg-primary/10 border-primary text-primary font-bold' : 'hover:bg-muted'}`}><TrainFront className="h-4 w-4" /> Passenger</div>
+                        <div onClick={() => setTrainType('goods')} className={`cursor-pointer border rounded-md p-2 flex items-center justify-center gap-2 text-xs transition-colors ${trainType === 'goods' ? 'bg-primary/10 border-primary text-primary font-bold' : 'hover:bg-muted'}`}><Truck className="h-4 w-4" /> Goods</div>
                     </div>
                   </div>
 
-                  {/* Time Window (NEW) */}
                   <div className="space-y-2">
                     <Label className="text-xs flex items-center gap-2"><CalendarClock className="h-3 w-3"/> Trip Window (Optional)</Label>
                     <div className="grid grid-cols-2 gap-2">
-                        <div className="space-y-1">
-                            <span className="text-[10px] text-muted-foreground uppercase font-bold">Departure</span>
-                            <Input type="datetime-local" className="text-xs h-8" value={depTime} onChange={(e) => setDepTime(e.target.value)} />
-                        </div>
-                        <div className="space-y-1">
-                            <span className="text-[10px] text-muted-foreground uppercase font-bold">Arrival</span>
-                            <Input type="datetime-local" className="text-xs h-8" value={arrTime} onChange={(e) => setArrTime(e.target.value)} />
-                        </div>
+                        <div className="space-y-1"><span className="text-[10px] text-muted-foreground uppercase font-bold">Departure</span><Input type="datetime-local" className="text-xs h-8" value={depTime} onChange={(e) => setDepTime(e.target.value)} /></div>
+                        <div className="space-y-1"><span className="text-[10px] text-muted-foreground uppercase font-bold">Arrival</span><Input type="datetime-local" className="text-xs h-8" value={arrTime} onChange={(e) => setArrTime(e.target.value)} /></div>
                     </div>
                   </div>
 
@@ -154,10 +139,7 @@ export default function Home() {
 
                 {/* 3. Caution Orders */}
                 <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                      <h3 className="font-semibold text-sm">Caution Orders</h3>
-                      <span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full">{cautionOrders.length} Active</span>
-                  </div>
+                  <div className="flex items-center justify-between"><h3 className="font-semibold text-sm">Caution Orders</h3><span className="text-xs text-muted-foreground bg-muted px-2 py-0.5 rounded-full">{cautionOrders.length} Active</span></div>
                   <div className="grid grid-cols-[1fr_1fr_0.7fr] gap-2">
                     <Input placeholder="Start" className="text-xs" value={newCO.startOhe} onChange={(e) => setNewCO({...newCO, startOhe: e.target.value})} />
                     <Input placeholder="End" className="text-xs" value={newCO.endOhe} onChange={(e) => setNewCO({...newCO, endOhe: e.target.value})} />
@@ -176,14 +158,12 @@ export default function Home() {
                   )}
                 </div>
 
-                {/* 4. Action */}
                 <div className="pt-2">
                     <Button onClick={handleAnalyze} disabled={!canAnalyze || isProcessing} className="w-full font-bold shadow-sm" size="lg">
                     {isProcessing ? <><span className="mr-2 h-4 w-4 animate-spin rounded-full border-2 border-background border-t-transparent" /> Analyzing...</> : "Run Analysis"}
                     </Button>
                 </div>
 
-                {/* Status */}
                 {status.type !== 'idle' && (
                     <div className={`rounded-lg border p-3 text-xs font-medium flex items-center gap-2 ${status.type === "success" ? "border-green-200 bg-green-50 text-green-700" : status.type === "error" ? "border-red-200 bg-red-50 text-red-700" : "border-blue-200 bg-blue-50 text-blue-700"}`}>
                         {status.type === "error" ? <AlertTriangle className="h-4 w-4" /> : <div className="h-2 w-2 rounded-full bg-current animate-pulse"/>}

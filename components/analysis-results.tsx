@@ -21,7 +21,8 @@ import {
 import jsPDF from "jspdf"
 import autoTable from "jspdf-autotable"
 
-// --- IMPORT TYPES FROM ANALYZER (No more duplication errors) ---
+// --- IMPORT TYPES FROM ANALYZER ---
+// This ensures 100% compatibility and fixes the "red cross" error
 import { AnalysisSummary, AnalysisResult } from "@/lib/analyzer"
 
 interface AnalysisResultProps {

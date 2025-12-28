@@ -35,7 +35,7 @@ export interface Stoppage {
 
 export interface HaltApproachViolation {
   haltLocation: string;
-  checkpoint: string;    
+  checkpoint: string;     
   limit: number;
   actualSpeed: number;
   timestamp: string;
@@ -51,7 +51,7 @@ export interface AnalysisResult {
   status: 'ok' | 'warning' | 'violation'; 
   matched: boolean;
   source: 'OHE' | 'Signal';
-  chainage?: number; // Added for debugging/reference
+  chainage?: number; 
 }
 
 export interface AnalysisSummary {
@@ -79,11 +79,11 @@ interface GPSPoint {
   speed: number;
   time: Date;
   timeStr: string;
-  heading: number; // Added Heading
+  heading: number;
 }
 
 // ==========================================
-// 2. Math & Geometry Helpers (UPDATED)
+// 2. Math & Geometry Helpers
 // ==========================================
 
 const EARTH_RADIUS = 6371000.0;
@@ -100,9 +100,6 @@ function cleanCoord(val: any): number {
 function toRad(deg: number) { return deg * TO_RAD; }
 function toDeg(rad: number) { return rad * TO_DEG; }
 
-/**
- * Calculates Haversine distance in meters
- */
 function getDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
@@ -113,9 +110,6 @@ function getDistance(lat1: number, lon1: number, lat2: number, lon2: number): nu
   return EARTH_RADIUS * c;
 }
 
-/**
- * Calculates Bearing (Heading) between two points (0-360)
- */
 function getBearing(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const dLon = toRad(lon2 - lon1);
   const y = Math.sin(dLon) * Math.cos(toRad(lat2));
@@ -125,44 +119,27 @@ function getBearing(lat1: number, lon1: number, lat2: number, lon2: number): num
   return (toDeg(brng) + 360) % 360;
 }
 
-/**
- * Convert OHE string "962/10" to linear meters.
- * Assumes 60m span between masts.
- */
 function oheToMeters(oheStr: string): number {
   if (!oheStr) return 0;
   const clean = oheStr.replace(/[^\d\/]/g, '');
-  
   if (clean.includes('/')) {
     const [km, pole] = clean.split('/').map(Number);
-    // KM * 1000 + Pole * 60m (Approx standard span)
     return (km * 1000) + (pole * 60);
   }
-  
   const val = Number(clean);
   return isNaN(val) ? 0 : val * 1000;
 }
 
-/**
- * Vector Projection Logic to Snap GPS to Track Line
- */
 function getProjectedChainage(
   trainLat: number, trainLon: number, trainHeading: number,
   segStartLat: number, segStartLon: number, segStartMeters: number,
   segEndLat: number, segEndLon: number
 ): number | null {
-
-  // 1. Heading Check (Parallel Track Fix)
-  // Calculate bearing of the OHE segment itself
   const segBearing = getBearing(segStartLat, segStartLon, segEndLat, segEndLon);
-  
   let diff = Math.abs(segBearing - trainHeading);
   if (diff > 180) diff = 360 - diff;
-  
-  // If train heading differs by > 45 degrees, it's likely on the other line or moving backwards
   if (diff > 45) return null; 
 
-  // 2. Vector Projection
   const Ax = segStartLat, Ay = segStartLon;
   const Bx = segEndLat,   By = segEndLon;
   const Px = trainLat,    Py = trainLon;
@@ -177,50 +154,89 @@ function getProjectedChainage(
 
   let t = -1;
   if (lenSq !== 0) t = dot / lenSq;
-
-  // If projected point is outside the segment (with small buffer), reject
   if (t < -0.1 || t > 1.1) return null;
 
-  // Calculate Linear Distance
   const segLen = getDistance(segStartLat, segStartLon, segEndLat, segEndLon);
   return segStartMeters + (t * segLen);
 }
 
-
 // ==========================================
-// 3. New Logic: Precise Speed Limit Check
+// 3. New Logic: Spatial Caution Order "Walk"
 // ==========================================
 
-function getApplicableLimitLinear(
-  currentChainage: number,
-  globalMPS: number, 
-  cautionOrders: CautionOrder[],
+function preprocessCautionOrders(
+  orders: CautionOrder[],
+  masterData: Array<Record<string, string>>,
+  labelCol: string,
+  latCol: string,
+  lonCol: string,
   trainLength: number
-): number {
-  let limit = globalMPS;
+): { startM: number; endM: number; limit: number }[] {
+  
+  return orders.map(co => {
+    // 1. Find physical indices in Master Data
+    const startIdx = masterData.findIndex(row => (row[labelCol] || "").trim() === co.startOhe.trim());
+    const endIdx = masterData.findIndex(row => (row[labelCol] || "").trim() === co.endOhe.trim());
 
-  for (const co of cautionOrders) {
-    const startM = oheToMeters(co.startOhe);
-    const endM = oheToMeters(co.endOhe);
-    
-    // Normalize range (ensure start < end)
-    const zoneStart = Math.min(startM, endM);
-    const zoneEnd = Math.max(startM, endM);
-
-    // ** CORE LOGIC FIX **
-    // The restriction applies from Start OHE until the LAST COACH clears the End OHE.
-    // So valid range is: [Start, End + TrainLength]
-    const effectiveEnd = zoneEnd + trainLength;
-
-    if (currentChainage >= zoneStart && currentChainage <= effectiveEnd) {
-      if (co.speedLimit < limit) {
-        limit = co.speedLimit;
-      }
+    // Fallback if OHE not found in file
+    if (startIdx === -1 || endIdx === -1) {
+      const s = oheToMeters(co.startOhe);
+      const e = oheToMeters(co.endOhe);
+      return { 
+        startM: Math.min(s, e), 
+        endM: Math.max(s, e) + trainLength, 
+        limit: co.speedLimit 
+      };
     }
-  }
-  return limit;
-}
 
+    // 2. Determine Direction (Are we moving down or up the list?)
+    // Direction = 1 means we move to higher indices; -1 means lower indices
+    const direction = endIdx > startIdx ? 1 : -1;
+    
+    // 3. "Walk" the train length starting from the End point
+    let currentIdx = endIdx;
+    let distanceCovered = 0;
+
+    // Safety limit to prevent infinite loops (max 100 masts check ~ 6km)
+    let steps = 0;
+    while (distanceCovered < trainLength && steps < 100) {
+      const nextIdx = currentIdx + direction;
+
+      // Stop if we hit the file boundary
+      if (nextIdx < 0 || nextIdx >= masterData.length) break;
+
+      const p1 = masterData[currentIdx];
+      const p2 = masterData[nextIdx];
+
+      const lat1 = cleanCoord(p1[latCol]);
+      const lon1 = cleanCoord(p1[lonCol]);
+      const lat2 = cleanCoord(p2[latCol]);
+      const lon2 = cleanCoord(p2[lonCol]);
+
+      if (!isNaN(lat1) && !isNaN(lon1) && !isNaN(lat2) && !isNaN(lon2)) {
+        const d = getDistance(lat1, lon1, lat2, lon2);
+        // Sanity check: if distance between masts > 200m, likely data gap, stop here
+        if (d < 200) distanceCovered += d;
+      }
+      
+      currentIdx = nextIdx;
+      steps++;
+    }
+
+    // 4. Determine Effective Range
+    const startM = oheToMeters(masterData[startIdx][labelCol]);
+    const endM = oheToMeters(masterData[endIdx][labelCol]);
+    const extendedEndM = oheToMeters(masterData[currentIdx][labelCol]);
+
+    // Create a min/max range for fast checking later
+    // The valid range is everything between Start and the Extended End point
+    return {
+      startM: Math.min(startM, extendedEndM),
+      endM: Math.max(startM, extendedEndM),
+      limit: co.speedLimit
+    };
+  });
+}
 
 // ==========================================
 // 4. Data Parsing Helpers
@@ -251,15 +267,12 @@ class GridIndex {
 }
 
 function parseCSV(content: string): Array<Record<string, string>> {
-  const lines = content.split("\n").filter((line) => line.trim());
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(",").map((h) => h.trim());
-  return lines.slice(1).map((line) => {
-    const values = line.split(",").map((v) => v.trim());
-    const row: Record<string, string> = {};
-    headers.forEach((h, i) => (row[h] = values[i] || ""));
-    return row;
+  const result = Papa.parse(content, {
+    header: true,
+    skipEmptyLines: true,
+    transformHeader: (h) => h.trim()
   });
+  return result.data as Array<Record<string, string>>;
 }
 
 function findColumn(data: Array<Record<string, string>>, names: string[]): string | null {
@@ -273,7 +286,7 @@ function findColumn(data: Array<Record<string, string>>, names: string[]): strin
 }
 
 // ==========================================
-// 5. CORE ANALYZER (Refactored)
+// 5. CORE ANALYZER
 // ==========================================
 
 export async function analyzeData(
@@ -307,12 +320,11 @@ export async function analyzeData(
   const depTimeMs = departureTime ? new Date(departureTime).getTime() : 0;
   const arrTimeMs = arrivalTime ? new Date(arrivalTime).getTime() : Infinity;
 
-  // Convert raw RTIS to typed objects
   let tempRtis: GPSPoint[] = rtisDataRaw
     .map((row, idx) => {
       let lat = cleanCoord(row[rtisLatCol]);
       let lon = cleanCoord(row[rtisLonCol]);
-      if (lat > 60 && lon < 40) { [lat, lon] = [lon, lat]; } // Auto-fix flipped coords
+      if (lat > 60 && lon < 40) { [lat, lon] = [lon, lat]; } 
       
       const speedRaw = parseFloat(row[rtisSpeedCol]);
       const timeStr = row[rtisTimeCol];
@@ -323,30 +335,27 @@ export async function analyzeData(
         speed: !isNaN(speedRaw) ? Math.round(speedRaw) : 0,
         time: timeDate,
         timeStr,
-        heading: 0 // Will calc next
+        heading: 0
       };
     })
     .filter(p => !isNaN(p.lat) && !isNaN(p.lon) && p.lat !== 0 && p.lon !== 0)
     .filter(p => p.time.getTime() >= depTimeMs && p.time.getTime() <= arrTimeMs)
     .sort((a, b) => a.time.getTime() - b.time.getTime());
 
-  // Calculate Headings (Bearing between P[i] and P[i+1])
   for(let i = 0; i < tempRtis.length - 1; i++) {
     const dist = getDistance(tempRtis[i].lat, tempRtis[i].lon, tempRtis[i+1].lat, tempRtis[i+1].lon);
-    if(dist > 5) { // Only update heading if moved > 5m to reduce jitter
+    if(dist > 5) {
         tempRtis[i].heading = getBearing(tempRtis[i].lat, tempRtis[i].lon, tempRtis[i+1].lat, tempRtis[i+1].lon);
     } else if (i > 0) {
-        tempRtis[i].heading = tempRtis[i-1].heading; // Maintain previous if stopped
+        tempRtis[i].heading = tempRtis[i-1].heading;
     }
   }
-  // Fill last point
   if(tempRtis.length > 0) tempRtis[tempRtis.length-1].heading = tempRtis[tempRtis.length-2]?.heading || 0;
 
   const rtisCleaned = tempRtis;
   const trainLength = trainType === 'goods' ? 700 : 600; 
 
   // --- 3. Process OHE (Master Data) ---
-  // We need to sort OHE data to create a "Track Line" for snapping
   const isOheMaster = oheDataRaw.length > 0;
   let masterDataRaw = isOheMaster ? oheDataRaw : signalsDataRaw;
   
@@ -355,6 +364,13 @@ export async function analyzeData(
   const masterLabelCol = findColumn(masterDataRaw, ["OHEMas", "OHE", "pole", "Signal", "Name", "Station", "Label", "Asset"]) || "Location";
 
   if (!masterLatCol || !masterLonCol) throw new Error("Master file missing Latitude/Longitude columns");
+
+  // --- NEW: Preprocess Caution Orders (Spatial Walk) ---
+  // We only do this if we have OHE master data available
+  let processedCOs: { startM: number; endM: number; limit: number }[] = [];
+  if (isOheMaster) {
+    processedCOs = preprocessCautionOrders(cautionOrders, masterDataRaw, masterLabelCol, masterLatCol, masterLonCol, trainLength);
+  }
 
   // Create Grid for Fast Lookup
   const rtisMatchGrid = new GridIndex(0.01);
@@ -368,9 +384,6 @@ export async function analyzeData(
   const processDataset = (data: any[], type: 'OHE' | 'Signal', latCol: string, lonCol: string, labelCol: string) => {
       const out: AnalysisResult[] = [];
       const threshold = (maxDistance && maxDistance > 0) ? maxDistance : 500;
-
-      // Helper to find next valid OHE for segment creation
-      // We assume data is somewhat sorted or we look ahead
       
       for (let i = 0; i < data.length; i++) {
           const row = data[i];
@@ -381,7 +394,6 @@ export async function analyzeData(
           if (isNaN(lat) || isNaN(lon)) continue;
           if (lat > 60 && lon < 40) { [lat, lon] = [lon, lat]; }
 
-          // A. Find best GPS Candidate (Spatial filter first)
           const candidates = rtisMatchGrid.query(lat, lon);
           let bestP: GPSPoint | null = null;
           let bestDist = Infinity;
@@ -389,13 +401,6 @@ export async function analyzeData(
           candidates.forEach(c => {
               const rtisPt = rtisCleaned[c.idx];
               const dist = getDistance(lat, lon, rtisPt.lat, rtisPt.lon);
-              
-              // NEW: Directional Filter (Rough check)
-              // We refine this later with projection, but if heading is wildly off, 
-              // it's likely a train on the return leg on parallel track.
-              // (Skipped here to ensure we at least find a "nearest" point, 
-              // precise check happens in Limit calculation)
-              
               if (dist < bestDist) { 
                   bestDist = dist; 
                   bestP = rtisPt; 
@@ -418,18 +423,13 @@ export async function analyzeData(
 
               if (type === 'OHE') {
                   const oheMeters = oheToMeters(locName);
-                  
-                  // B. Precise Snapping & Limit Logic
-                  // We attempt to form a segment with the next OHE structure
-                  // to calculate exact chainage of the train.
                   let snappedMeters: number | null = null;
                   
-                  // Look ahead for next OHE to form a segment
+                  // Projection / Snapping
                   if (i < data.length - 1) {
                       const nextRow = data[i+1];
                       const nextLat = cleanCoord(nextRow[latCol]);
                       const nextLon = cleanCoord(nextRow[lonCol]);
-                      
                       if (!isNaN(nextLat) && !isNaN(nextLon)) {
                           snappedMeters = getProjectedChainage(
                               (bestP as GPSPoint).lat, (bestP as GPSPoint).lon, (bestP as GPSPoint).heading,
@@ -438,20 +438,19 @@ export async function analyzeData(
                           );
                       }
                   }
-                  
-                  // If snapping failed (end of line or bad heading), fall back to OHE's own meter value
-                  // But ONLY if heading is roughly consistent (optional strictness)
-                  if (snappedMeters === null) {
-                      snappedMeters = oheMeters; 
-                  }
-
+                  if (snappedMeters === null) snappedMeters = oheMeters; 
                   calculatedChainage = snappedMeters;
 
-                  // C. Apply Limits using Linear Reference
-                  limitApplied = getApplicableLimitLinear(snappedMeters, globalMPS, cautionOrders, trainLength);
+                  // --- Limit Check using Preprocessed Spatial Data ---
+                  limitApplied = globalMPS;
+                  for (const co of processedCOs) {
+                    if (calculatedChainage >= co.startM && calculatedChainage <= co.endM) {
+                       if (co.limit < limitApplied!) limitApplied = co.limit;
+                    }
+                  }
 
-                  if (speed! > limitApplied + 3) { status = 'violation'; }
-                  else if (speed! > limitApplied) { status = 'warning'; }
+                  if (speed! > limitApplied! + 3) { status = 'violation'; }
+                  else if (speed! > limitApplied!) { status = 'warning'; }
               }
           }
 
@@ -473,7 +472,7 @@ export async function analyzeData(
 
   const finalResults = processDataset(masterDataRaw, isOheMaster ? 'OHE' : 'Signal', masterLatCol, masterLonCol, masterLabelCol);
   
-  // --- 5. Signal History for Backtracking ---
+  // --- 5. Signal History ---
   let signalResults: AnalysisResult[] = [];
   let signalHistory: AnalysisResult[] = [];
   
@@ -494,15 +493,12 @@ export async function analyzeData(
       ? rtisCleaned.filter(p => p.idx >= firstMatchedRtisIndex && p.idx <= lastMatchedRtisIndex)
       : [];
 
-  // --- 7. Brake Tests (BFT/BPT) - Preserved Logic ---
+  // --- 7. Brake Tests (BFT/BPT) ---
   const brakeTests: BrakeTestResult[] = [];
   if (validSectionData.length > 0) {
       const startLoc = validSectionData[0];
       const entrySpeed = startLoc.speed;
-
-      // Helper to find name for brake test location
       const findLocName = (lat: number, lon: number) => {
-         // Simple nearest neighbor from results
          let minD = Infinity; let name = "Unknown";
          finalResults.forEach(r => {
              const d = getDistance(lat, lon, r.latitude, r.longitude);
@@ -566,11 +562,9 @@ export async function analyzeData(
       }
   }
 
-  // --- 8. Stoppages & Halt Violations (Preserved Logic) ---
+  // --- 8. Stoppages & Halt Violations ---
   const stoppages: Stoppage[] = [];
   let stopStart: GPSPoint | null = null;
-  
-  // Helper for finding nearest signal for stoppages
   const isNearSignal = (lat: number, lon: number) => {
       let found = false; let name = ""; let minD = Infinity;
       signalResults.forEach(s => {
@@ -581,7 +575,6 @@ export async function analyzeData(
   };
 
   const stoppageSource = validSectionData;
-
   for (let i = 0; i < stoppageSource.length; i++) {
       const p = stoppageSource[i];
       if (p.speed === 0) {

@@ -8,7 +8,9 @@ import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { AnalysisResults } from "@/components/analysis-results"
-import { analyzeData, CautionOrder, TrainType } from "@/lib/analyzer"
+
+// SAFE RELATIVE IMPORT
+import { analyzeData, CautionOrder, TrainType } from "../lib/analyzer"
 
 export default function Home() {
   const [rtisFile, setRtisFile] = useState<File | null>(null)

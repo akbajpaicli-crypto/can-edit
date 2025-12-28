@@ -8,7 +8,6 @@ import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { AnalysisResults } from "@/components/analysis-results"
-// IMPORTANT: Importing directly from lib ensures client-side execution (no server timeout)
 import { analyzeData, CautionOrder, TrainType } from "@/lib/analyzer"
 
 export default function Home() {
@@ -21,6 +20,8 @@ export default function Home() {
   const [maxDistance, setMaxDistance] = useState<number>(50)
   const [globalMPS, setGlobalMPS] = useState<number>(110)
   const [trainType, setTrainType] = useState<TrainType>('passenger')
+  const [departureTime, setDepartureTime] = useState<string>("")
+  const [arrivalTime, setArrivalTime] = useState<string>("")
   
   // Caution Order State
   const [cautionOrders, setCautionOrders] = useState<CautionOrder[]>([])
@@ -71,11 +72,21 @@ export default function Home() {
     }
 
     setIsProcessing(true)
-    setStatus({ type: "processing", message: "Processing... (This runs in your browser)" })
+    setStatus({ type: "processing", message: "Processing..." })
 
     try {
-      // Direct Function Call (Client Side)
-      const data = await analyzeData(rtisFile, oheFile, signalsFile, maxDistance, globalMPS, cautionOrders, trainType)
+      // Pass the new time states to the analyzer
+      const data = await analyzeData(
+        rtisFile, 
+        oheFile, 
+        signalsFile, 
+        maxDistance, 
+        globalMPS, 
+        cautionOrders, 
+        trainType,
+        departureTime,
+        arrivalTime
+      )
       setResults(data)
       setStatus({ type: "success", message: `Success! Processed ${data.summary.total_structures} locations.` })
     } catch (error) {
@@ -91,24 +102,17 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
-      {/* Header */}
       <header className="border-b border-border bg-white shadow-sm sticky top-0 z-50">
         <div className="container mx-auto px-4 py-3">
           <div className="flex items-center gap-4">
-            
-            {/* LOGO */}
             <div className="flex-shrink-0">
                <img 
                  src="/railway-logo.jpeg" 
                  alt="Railway Logo" 
                  className="h-14 w-auto object-contain"
-                 onError={(e) => {
-                    (e.target as HTMLImageElement).style.display = 'none';
-                 }} 
+                 onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} 
                />
             </div>
-
-            {/* Title Text */}
             <div>
                 <h1 className="text-2xl font-bold text-foreground leading-tight tracking-tight">Railway Geo-Analytics Platform</h1>
                 <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">West Central Railway • Jabalpur Division</p>
@@ -119,8 +123,6 @@ export default function Home() {
 
       <div className="container mx-auto p-4 flex-grow">
         <div className="grid gap-6 lg:grid-cols-[400px_1fr]">
-          
-          {/* --- Control Panel --- */}
           <div className="space-y-6">
             <Card className="p-6 shadow-md">
               <div className="space-y-6">
@@ -148,6 +150,18 @@ export default function Home() {
                 <div className="space-y-4 border-b pb-4">
                   <h3 className="font-semibold text-sm">Configuration</h3>
                   
+                  {/* Time Filtering Inputs */}
+                  <div className="grid grid-cols-2 gap-3 p-3 bg-slate-50 rounded-md border">
+                    <div className="space-y-1">
+                      <Label className="text-xs font-medium text-slate-700">Departure Time</Label>
+                      <Input type="datetime-local" className="h-8 text-xs bg-white" value={departureTime} onChange={(e) => setDepartureTime(e.target.value)} />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs font-medium text-slate-700">Arrival Time</Label>
+                      <Input type="datetime-local" className="h-8 text-xs bg-white" value={arrivalTime} onChange={(e) => setArrivalTime(e.target.value)} />
+                    </div>
+                  </div>
+
                   <div className="space-y-2">
                     <Label className="text-xs">Train Type</Label>
                     <div className="grid grid-cols-2 gap-2">
@@ -225,12 +239,10 @@ export default function Home() {
                         {status.message}
                     </div>
                 )}
-
               </div>
             </Card>
           </div>
 
-          {/* --- Results Area --- */}
           <div className="min-h-[600px]">
             {results ? (
               <AnalysisResults data={results} />
@@ -253,7 +265,6 @@ export default function Home() {
         </div>
       </div>
 
-      {/* --- Footer --- */}
       <footer className="border-t bg-white py-6 mt-8">
         <div className="container mx-auto px-4 text-center">
             <p className="text-sm font-medium text-gray-900">

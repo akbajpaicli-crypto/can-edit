@@ -12,8 +12,9 @@ export type TrainType = 'passenger' | 'goods';
 export interface BrakeTestResult {
   type: 'BFT' | 'BPT';
   status: 'proper' | 'improper' | 'not_performed';
-  testSpeed: number;
-  finalSpeed: number;
+  startSpeed: number;
+  lowestSpeed: number;
+  dropAmount: number;
   location: string;
   timestamp: string;
   details?: string;
@@ -29,10 +30,9 @@ export interface Stoppage {
   isSignal: boolean;
 }
 
-// Updated Interface for Signal Backtracking
 export interface HaltApproachViolation {
-  haltLocation: string; // The Signal where train stopped
-  checkpoint: string;   // "100m Approach", "Prev Signal", "2nd Prev Signal"
+  haltLocation: string;
+  checkpoint: string;   
   limit: number;
   actualSpeed: number;
   timestamp: string;
@@ -242,15 +242,13 @@ export async function analyzeData(
       }
   });
 
-  // --- STEP 3b: SIGNAL GRID (For Stoppage Logic) ---
+  // Signal Grid for Stoppage Logic
   const signalGrid = new GridIndex(0.01);
   let signalDataList: Array<{lat: number, lon: number, name: string}> = [];
-  
   if (signalsDataRaw.length > 0) {
       const sLat = findColumn(signalsDataRaw, ["Latitude", "latitude", "lat"]);
       const sLon = findColumn(signalsDataRaw, ["Longitude", "longitude", "lon"]);
       const sLbl = findColumn(signalsDataRaw, ["Signal", "Name", "Label", "Station"]) || "Signal";
-      
       if(sLat && sLon) {
           signalsDataRaw.forEach((row, idx) => {
               let lat = cleanCoord(row[sLat]);
@@ -293,7 +291,7 @@ export async function analyzeData(
       return { found: bestDist < 100, name: bestName };
   };
 
-  // --- STEP 4: PREPARE & FILTER RTIS ---
+  // --- STEP 4: PREPARE RTIS ---
   const depTimeMs = departureTime ? new Date(departureTime).getTime() : 0;
   const arrTimeMs = arrivalTime ? new Date(arrivalTime).getTime() : Infinity;
 
@@ -321,7 +319,7 @@ export async function analyzeData(
     .filter(p => p.time.getTime() >= depTimeMs && p.time.getTime() <= arrTimeMs)
     .sort((a, b) => a.time.getTime() - b.time.getTime());
 
-  // --- STEP 5: MATCHING & CAUTION LOGIC ---
+  // --- STEP 5: MATCHING ---
   const rtisMatchGrid = new GridIndex(0.01);
   rtisCleaned.forEach(p => rtisMatchGrid.insert(p.idx, p.lat, p.lon));
 
@@ -364,12 +362,7 @@ export async function analyzeData(
               if (pIdx > lastMatchedRtisIndex) lastMatchedRtisIndex = pIdx;
 
               if (type === 'OHE') {
-                  limitApplied = getApplicableLimit(
-                      locName, lat, lon, 
-                      globalMPS, cautionOrders, 
-                      oheLocationMap, trainLength
-                  );
-
+                  limitApplied = getApplicableLimit(locName, lat, lon, globalMPS, cautionOrders, oheLocationMap, trainLength);
                   if (speed! > limitApplied + 3) { status = 'violation'; }
                   else if (speed! > limitApplied) { status = 'warning'; }
               }
@@ -392,24 +385,22 @@ export async function analyzeData(
 
   const finalResults = processDataset(masterDataRaw, isOheMaster ? 'OHE' : 'Signal', masterLatCol, masterLonCol, masterLabelCol);
   
-  // *** GENERATE SIGNAL HISTORY FOR BACKTRACKING ***
+  // Signal History for Backtracking
   let signalResults: AnalysisResult[] = [];
-  let signalHistory: AnalysisResult[] = []; // Sorted list of passed signals
-
+  let signalHistory: AnalysisResult[] = [];
   if (isOheMaster && signalsDataRaw.length > 0) {
      const sLat = findColumn(signalsDataRaw, ["Latitude", "latitude", "lat"]);
      const sLon = findColumn(signalsDataRaw, ["Longitude", "longitude", "lon"]);
      const sLbl = findColumn(signalsDataRaw, ["Signal", "Name", "Label", "Station"]);
      if (sLat && sLon) {
          signalResults = processDataset(signalsDataRaw, 'Signal', sLat, sLon, sLbl || "Signal");
-         // Filter only matched signals and sort by time
          signalHistory = signalResults
             .filter(s => s.matched && s.logging_time)
             .sort((a, b) => new Date(a.logging_time).getTime() - new Date(b.logging_time).getTime());
      }
   }
 
-  // --- STEP 6: VALID SECTION DATA ---
+  // --- STEP 6: VALID SECTION ---
   const validSectionData = (firstMatchedRtisIndex !== Infinity && lastMatchedRtisIndex !== -1)
       ? rtisCleaned.filter(p => p.idx >= firstMatchedRtisIndex && p.idx <= lastMatchedRtisIndex)
       : [];
@@ -418,63 +409,74 @@ export async function analyzeData(
   const brakeTests: BrakeTestResult[] = [];
   if (validSectionData.length > 0) {
       const startLoc = validSectionData[0];
-      const BFT_TARGET_MIN = 10, BFT_TARGET_MAX = 15, BFT_FAIL_THRESHOLD = 15, BFT_DROP_REQ = 5;
-      const BPT_TARGET_MIN = 60, BPT_TARGET_MAX = 70;
       const entrySpeed = startLoc.speed;
 
-      if (entrySpeed > BFT_FAIL_THRESHOLD) {
-          brakeTests.push({ type: 'BFT', status: 'not_performed', testSpeed: entrySpeed, finalSpeed: entrySpeed, location: findNearestLocation(startLoc.lat, startLoc.lon), timestamp: startLoc.timeStr, details: `Running Train (>15 km/h)` });
-          brakeTests.push({ type: 'BPT', status: 'not_performed', testSpeed: entrySpeed, finalSpeed: entrySpeed, location: findNearestLocation(startLoc.lat, startLoc.lon), timestamp: startLoc.timeStr, details: `Running Train (>15 km/h)` });
+      // 1. Running Train Check
+      if (entrySpeed > 15) {
+          const detail = `Entered section at ${entrySpeed} km/h (Already Running)`;
+          brakeTests.push({ type: 'BFT', status: 'not_performed', startSpeed: entrySpeed, lowestSpeed: entrySpeed, dropAmount: 0, location: findNearestLocation(startLoc.lat, startLoc.lon), timestamp: startLoc.timeStr, details: detail });
+          brakeTests.push({ type: 'BPT', status: 'not_performed', startSpeed: entrySpeed, lowestSpeed: entrySpeed, dropAmount: 0, location: findNearestLocation(startLoc.lat, startLoc.lon), timestamp: startLoc.timeStr, details: detail });
       } else {
-          const checkSpeedDrop = (startIndex: number, dropAmount: number, isPercent: boolean): { passed: boolean, minSpeed: number } => {
-              let startSpeed = validSectionData[startIndex].speed;
-              let windowEnd = Math.min(startIndex + 180, validSectionData.length);
-              let minSpeed = startSpeed;
-              for (let j = startIndex; j < windowEnd; j++) {
-                  const p = validSectionData[j];
-                  if (p.speed < minSpeed) minSpeed = p.speed;
-                  if (p.speed === 0) { minSpeed = 0; break; } 
+          
+          // --- BFT LOGIC (Strict 10-15 Window) ---
+          let bftResult: BrakeTestResult | null = null;
+          
+          for (let i = 0; i < validSectionData.length - 1; i++) {
+              const p = validSectionData[i];
+              
+              // Fail Condition: Exceeded 15kmph without passing test
+              if (p.speed > 15) {
+                  bftResult = { type: 'BFT', status: 'improper', startSpeed: p.speed, lowestSpeed: p.speed, dropAmount: 0, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "Speed crossed 15kmph without valid test" };
+                  break; 
               }
-              let passed = false;
-              if (isPercent) passed = minSpeed <= (startSpeed * (1 - dropAmount));
-              else passed = (startSpeed - minSpeed) >= dropAmount;
-              return { passed, minSpeed };
-          };
 
-          // BFT & BPT Loops... (Standard Logic)
-          let bftDone = false;
-          for (let i = 0; i < validSectionData.length - 1; i++) {
-              const p = validSectionData[i];
-              if (p.speed > BFT_FAIL_THRESHOLD) {
-                  brakeTests.push({ type: 'BFT', status: 'improper', testSpeed: p.speed, finalSpeed: p.speed, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "Crossed 15 km/h without test" });
-                  bftDone = true; break;
-              }
-              if (p.speed >= BFT_TARGET_MIN && p.speed <= BFT_TARGET_MAX) {
-                  const result = checkSpeedDrop(i, BFT_DROP_REQ, false); 
-                  if (result.passed) {
-                      brakeTests.push({ type: 'BFT', status: 'proper', testSpeed: p.speed, finalSpeed: result.minSpeed, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr });
-                      bftDone = true; break;
+              // Test Window: 10 to 15
+              if (p.speed >= 10 && p.speed <= 15) {
+                  // Look ahead 20 seconds for a 5kmph drop
+                  let minSpeed = p.speed;
+                  let dropped = false;
+                  for(let j = i; j < Math.min(i + 20, validSectionData.length); j++) {
+                      if (validSectionData[j].speed < minSpeed) minSpeed = validSectionData[j].speed;
+                      if (validSectionData[j].speed === 0) minSpeed = 0; 
+                  }
+                  
+                  if (p.speed - minSpeed >= 5) {
+                      bftResult = { type: 'BFT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "Drop >= 5 kmph observed" };
+                      break; // Success
                   }
               }
           }
-          let bptDone = false;
+          if(bftResult) brakeTests.push(bftResult);
+
+
+          // --- BPT LOGIC (50% Drop from 60+) ---
+          let bptResult: BrakeTestResult | null = null;
+          // Look for opportunity within first 15km
           for (let i = 0; i < validSectionData.length - 1; i++) {
               const p = validSectionData[i];
-              const dist = haversineMeters(startLoc.lat, startLoc.lon, p.lat, p.lon);
-              if (dist > 15000) break; 
-              if (p.speed >= BPT_TARGET_MIN && p.speed <= BPT_TARGET_MAX) {
-                  const result = checkSpeedDrop(i, 0.5, true); 
-                  if (result.passed) {
-                      brakeTests.push({ type: 'BPT', status: 'proper', testSpeed: p.speed, finalSpeed: result.minSpeed, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr });
-                      bptDone = true; break;
+              if (haversineMeters(startLoc.lat, startLoc.lon, p.lat, p.lon) > 15000) break;
+
+              if (p.speed >= 60) {
+                  // Check for 50% drop within 60s
+                  let minSpeed = p.speed;
+                  for(let j = i; j < Math.min(i + 60, validSectionData.length); j++) {
+                      if (validSectionData[j].speed < minSpeed) minSpeed = validSectionData[j].speed;
+                  }
+                  
+                  if (minSpeed <= (p.speed * 0.5)) {
+                      bptResult = { type: 'BPT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "50% Drop observed" };
+                      break; 
                   }
               }
           }
-          if (!bptDone) {
-             const opp = validSectionData.find(p => p.speed >= BPT_TARGET_MIN && p.speed <= BPT_TARGET_MAX);
-             if(opp) {
-                 brakeTests.push({ type: 'BPT', status: 'improper', testSpeed: opp.speed, finalSpeed: opp.speed, location: findNearestLocation(opp.lat, opp.lon), timestamp: opp.timeStr, details: "Skipped Test" });
-             }
+          // If no proper result found, check if we missed an opportunity
+          if (!bptResult) {
+              const opp = validSectionData.find(p => p.speed >= 60);
+              if (opp && haversineMeters(startLoc.lat, startLoc.lon, opp.lat, opp.lon) <= 15000) {
+                  brakeTests.push({ type: 'BPT', status: 'improper', startSpeed: opp.speed, lowestSpeed: opp.speed, dropAmount: 0, location: findNearestLocation(opp.lat, opp.lon), timestamp: opp.timeStr, details: "Reached 60+ kmph but no 50% drop detected" });
+              }
+          } else {
+              brakeTests.push(bptResult);
           }
       }
   }
@@ -508,74 +510,42 @@ export async function analyzeData(
       }
   }
 
-  // --- STEP 9: HALT VIOLATIONS (BACKTRACKING LOGIC) ---
+  // --- STEP 9: HALT VIOLATIONS (Sequential Logic) ---
   const haltViolations: HaltApproachViolation[] = [];
-  
-  // Configurable Limits
-  const APPROACH_LIMIT_100M = 15; // kmph
-  const SIGNAL_PREV_1_LIMIT = 60; // kmph
-  const SIGNAL_PREV_2_LIMIT = 100; // kmph
+  const LIMIT_100M = 15; 
+  const LIMIT_PREV1 = 60; 
+  const LIMIT_PREV2 = 100; 
 
   stoppages.forEach(stop => {
-      // 1. Must be a Signal Stop
       if (!stop.isSignal) return;
-
-      // 2. Find Stop Index in RTIS
       const stopIdx = stoppageSource.findIndex(p => p.timeStr === stop.arrivalTime);
       if (stopIdx === -1) return;
 
-      // CHECK A: Immediate Approach (100m)
-      let found100Violation = false;
+      // 1. Check 100m Immediate Approach
       for (let i = stopIdx - 1; i >= 0; i--) {
           const p = stoppageSource[i];
           const dist = haversineMeters(stop.latitude, stop.longitude, p.lat, p.lon);
-          if (dist > 100) break; // Only check last 100m
-          if (p.speed > APPROACH_LIMIT_100M) {
-              // Found violation
-              haltViolations.push({ 
-                  haltLocation: stop.location, 
-                  checkpoint: '100m Approach', 
-                  limit: APPROACH_LIMIT_100M, 
-                  actualSpeed: p.speed, 
-                  timestamp: p.timeStr 
-              });
-              found100Violation = true;
-              break; // One violation per category is enough
+          if (dist > 100) break; 
+          if (p.speed > LIMIT_100M) {
+              haltViolations.push({ haltLocation: stop.location, checkpoint: '100m Approach', limit: LIMIT_100M, actualSpeed: p.speed, timestamp: p.timeStr });
+              break; 
           }
       }
 
-      // CHECK B: Previous Signals Backtracking
-      // Find this signal in history
+      // 2. Check Previous Signals
       const sigHistoryIdx = signalHistory.findIndex(s => s.location === stop.location && new Date(s.logging_time).getTime() <= new Date(stop.arrivalTime).getTime());
       
       if (sigHistoryIdx !== -1) {
-          // Check Previous Signal (-1)
           if (sigHistoryIdx > 0) {
               const prev1 = signalHistory[sigHistoryIdx - 1];
-              const prev1Speed = prev1.speed_kmph || 0;
-              if (prev1Speed > SIGNAL_PREV_1_LIMIT) {
-                  haltViolations.push({
-                      haltLocation: stop.location,
-                      checkpoint: `Prev Signal (${prev1.location})`,
-                      limit: SIGNAL_PREV_1_LIMIT,
-                      actualSpeed: Math.round(prev1Speed),
-                      timestamp: prev1.logging_time
-                  });
+              if ((prev1.speed_kmph || 0) > LIMIT_PREV1) {
+                  haltViolations.push({ haltLocation: stop.location, checkpoint: `Prev Signal (${prev1.location})`, limit: LIMIT_PREV1, actualSpeed: Math.round(prev1.speed_kmph || 0), timestamp: prev1.logging_time });
               }
           }
-
-          // Check 2nd Previous Signal (-2)
           if (sigHistoryIdx > 1) {
               const prev2 = signalHistory[sigHistoryIdx - 2];
-              const prev2Speed = prev2.speed_kmph || 0;
-              if (prev2Speed > SIGNAL_PREV_2_LIMIT) {
-                  haltViolations.push({
-                      haltLocation: stop.location,
-                      checkpoint: `2nd Prev Signal (${prev2.location})`,
-                      limit: SIGNAL_PREV_2_LIMIT,
-                      actualSpeed: Math.round(prev2Speed),
-                      timestamp: prev2.logging_time
-                  });
+              if ((prev2.speed_kmph || 0) > LIMIT_PREV2) {
+                  haltViolations.push({ haltLocation: stop.location, checkpoint: `2nd Prev Signal (${prev2.location})`, limit: LIMIT_PREV2, actualSpeed: Math.round(prev2.speed_kmph || 0), timestamp: prev2.logging_time });
               }
           }
       }

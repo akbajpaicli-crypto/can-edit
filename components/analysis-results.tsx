@@ -444,4 +444,18 @@ export function AnalysisResults({ data }: AnalysisResultsProps) {
              <div className="grid grid-cols-2 gap-4"><div className="space-y-2"><Label>CLI Name</Label><Input value={reportDetails.cliName} onChange={e => setReportDetails({...reportDetails, cliName: e.target.value})} /></div><div className="space-y-2"><Label>Section</Label><Input value={reportDetails.section} onChange={e => setReportDetails({...reportDetails, section: e.target.value})} /></div></div>
              <div className="space-y-2"><Label>MPS</Label><Input value={reportDetails.mps} onChange={e => setReportDetails({...reportDetails, mps: e.target.value})} /></div>
              <div className="space-y-2"><Label>Remarks</Label><Input value={reportDetails.globalRemarks} onChange={e => setReportDetails({...reportDetails, globalRemarks: e.target.value})} /></div>
-             <div className="space-y-2"><Label>Signature (Image)</Label><div className="flex gap-2 items-center
+             <div className="space-y-2"><Label>Signature (Image)</Label><div className="flex gap-2 items-center"><Input type="file" accept="image/*" onChange={handleSignatureUpload} className="w-full" />{signatureImg && <Button variant="ghost" size="icon" onClick={() => setSignatureImg(null)}><X className="h-4 w-4" /></Button>}</div>{signatureImg && <p className="text-xs text-green-600 flex items-center gap-1"><ImageIcon className="h-3 w-3"/> Signature Loaded</p>}</div>
+             <div className="grid grid-cols-2 gap-4 pt-4 border-t"><div className="space-y-2"><Label>From</Label><LocationAutocomplete value={reportDetails.fromLoc} onChange={v => setReportDetails({...reportDetails, fromLoc: v})} options={locOptions} placeholder="Start..." /></div><div className="space-y-2"><Label>To</Label><LocationAutocomplete value={reportDetails.toLoc} onChange={v => setReportDetails({...reportDetails, toLoc: v})} options={locOptions} placeholder="End..." /></div></div>
+          </div>
+          <DialogFooter className="sm:justify-between">
+            <Button variant="ghost" onClick={() => setIsReportDialogOpen(false)}>Cancel</Button>
+            <div className="flex gap-2">
+                <Button variant="secondary" onClick={handleDownloadSummaryReport} className="gap-2"><ClipboardList className="h-4 w-4" /> Report Summary</Button>
+                <Button onClick={handleDownloadFullReport} className="gap-2"><FileText className="h-4 w-4" /> Full Report</Button>
+            </div>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}

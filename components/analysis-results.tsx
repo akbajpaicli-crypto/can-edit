@@ -21,7 +21,6 @@ import {
 import jsPDF from "jspdf"
 import autoTable from "jspdf-autotable"
 
-// --- Types ---
 interface Stoppage {
   location: string;
   arrivalTime: string;
@@ -72,7 +71,6 @@ interface AnalysisResultProps {
   }
 }
 
-// --- Helper: Searchable Input ---
 function LocationAutocomplete({ value, onChange, options, placeholder }: { value: string, onChange: (val: string) => void, options: string[], placeholder: string }) {
   const [isOpen, setIsOpen] = useState(false);
   const [isFocused, setIsFocused] = useState(false);
@@ -240,7 +238,6 @@ export function AnalysisResults({ data }: AnalysisResultProps) {
     } else {
         autoTable(doc, {
             startY: yPos,
-            // Format: Speed Drop Arrow
             head: [["Type", "Speed Drop (Start -> End)", "Status", "Loc", "Time"]],
             body: data.summary.brake_tests.map(t => [
                 t.type, 
@@ -417,7 +414,6 @@ export function AnalysisResults({ data }: AnalysisResultProps) {
                         <CardContent className="space-y-2 text-sm">
                             <div className="flex justify-between items-center border-b pb-2"><span>Status:</span><span className={`font-bold uppercase ${test.status === 'proper' ? 'text-green-600' : test.status === 'not_performed' ? 'text-gray-500' : 'text-red-600'}`}>{test.status.replace('_', ' ')}</span></div>
                             
-                            {/* UPDATED: Format as per 3rd Pic Requirement */}
                             <div className="grid grid-cols-2 gap-4 py-2">
                                 <div><p className="text-xs text-muted-foreground">Start Speed</p><p className="font-medium">{test.startSpeed} km/h</p></div>
                                 <div><p className="text-xs text-muted-foreground">End Speed</p><p className="font-medium">{test.lowestSpeed} km/h</p></div>

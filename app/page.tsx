@@ -17,47 +17,61 @@ interface CautionOrder {
   speed: string;
 }
 
-// --- BUILT-IN ROBUST PARSER (Fixes 'reading lat' and missing signals) ---
-const parseCSV = async (file: File) => {
-  const text = await file.text();
-  const lines = text.split(/\r?\n/).filter(line => line.trim() !== ""); // Remove empty lines
-  if (lines.length < 2) return [];
-
-  const headers = lines[0].toLowerCase().split(",").map(h => h.trim());
-  
-  // Helper to find column index loosely
-  const getIdx = (candidates: string[]) => headers.findIndex(h => candidates.some(c => h.includes(c)));
-
-  const latIdx = getIdx(['lat', 'latitude']);
-  const lngIdx = getIdx(['lon', 'lng', 'longitude']);
-  const speedIdx = getIdx(['speed', 'velocity', 'kmph']);
-  const locIdx = getIdx(['loc', 'station', 'km_post', 'mast']);
-  const timeIdx = getIdx(['time', 'date', 'timestamp']);
-  const typeIdx = getIdx(['type', 'source', 'obj']);
-
-  return lines.slice(1).map(line => {
-    const cols = line.split(",");
+// --- ROBUST LOCAL PARSER (Renamed to ensure you use this one) ---
+// This function manually handles CSVs to prevent 'reading lat' errors
+const localCsvParser = async (file: File) => {
+  try {
+    const text = await file.text();
+    // Split by new line and remove empty rows
+    const lines = text.split(/\r?\n/).filter(line => line.trim() !== ""); 
     
-    // Safety: Skip if column count doesn't match roughly
-    if (cols.length < 2) return null;
+    if (lines.length < 2) return []; // Need header + 1 row
 
-    const lat = parseFloat(cols[latIdx]);
-    const lng = parseFloat(cols[lngIdx]);
+    // Normalize headers to lowercase to find columns easily
+    const headers = lines[0].toLowerCase().split(",").map(h => h.trim());
+    
+    // Helper to find column index (returns -1 if not found)
+    const getIdx = (candidates: string[]) => headers.findIndex(h => candidates.some(c => h.includes(c)));
 
-    // Skip invalid coordinates (Prevents 'reading lat' crash)
-    if (isNaN(lat) || isNaN(lng)) return null;
+    // Detect column indices dynamically
+    const latIdx = getIdx(['lat', 'latitude']);
+    const lngIdx = getIdx(['lon', 'lng', 'longitude']);
+    const speedIdx = getIdx(['speed', 'velocity', 'kmph']);
+    const locIdx = getIdx(['loc', 'station', 'km_post', 'mast']);
+    const timeIdx = getIdx(['time', 'date', 'timestamp']);
+    const typeIdx = getIdx(['type', 'source', 'obj']);
 
-    return {
-      location: cols[locIdx] || `Point ${lat.toFixed(4)},${lng.toFixed(4)}`,
-      latitude: lat,
-      longitude: lng,
-      speed_kmph: speedIdx !== -1 ? parseFloat(cols[speedIdx]) || 0 : 0,
-      logging_time: timeIdx !== -1 ? cols[timeIdx] : new Date().toISOString(),
-      source: typeIdx !== -1 ? cols[typeIdx] : 'GPS',
-      matched: true, // Default to true for visualization
-      status: 'ok' as const
-    };
-  }).filter(Boolean); // Remove nulls
+    // Parse each line
+    return lines.slice(1).map((line, index) => {
+      const cols = line.split(",");
+      
+      // Skip if row is too short
+      if (cols.length < 2) return null;
+
+      // Safe number parsing
+      const lat = parseFloat(cols[latIdx]);
+      const lng = parseFloat(cols[lngIdx]);
+
+      // CRITICAL SAFETY CHECK: Skip invalid coordinates to prevent crashes later
+      if (isNaN(lat) || isNaN(lng)) {
+        return null;
+      }
+
+      return {
+        location: cols[locIdx] || `Point ${index + 1}`,
+        latitude: lat,
+        longitude: lng,
+        speed_kmph: speedIdx !== -1 ? (parseFloat(cols[speedIdx]) || 0) : 0,
+        logging_time: timeIdx !== -1 ? cols[timeIdx] : new Date().toISOString(),
+        source: typeIdx !== -1 ? cols[typeIdx] : 'GPS',
+        matched: true, 
+        status: 'ok' as const
+      };
+    }).filter(Boolean); // Remove null entries
+  } catch (e) {
+    console.error("CSV Parse Error:", e);
+    return [];
+  }
 };
 
 export default function DashboardPage() {
@@ -94,6 +108,7 @@ export default function DashboardPage() {
     setCautionOrders(cautionOrders.map(c => c.id === id ? { ...c, [field]: value } : c))
   }
 
+  // --- MAIN ANALYSIS FUNCTION ---
   const handleAnalysis = async () => {
     setError(null)
     setIsAnalyzing(true)
@@ -102,20 +117,24 @@ export default function DashboardPage() {
     try {
       if (!gpsFile) throw new Error("Please upload a GPS CSV file to begin.")
 
-      // 1. Parse GPS Data
-      const gpsResults = await parseCSV(gpsFile);
-      if (gpsResults.length === 0) throw new Error("GPS File is empty or has invalid coordinates.");
+      // 1. Parse GPS Data using LOCAL parser (Do not use external 'analyzeData')
+      const gpsResults = await localCsvParser(gpsFile);
+      
+      if (!gpsResults || gpsResults.length === 0) {
+        throw new Error("GPS File is empty, formatted incorrectly, or contains no valid coordinates.");
+      }
 
       // 2. Parse Signal Data (Optional)
       let signalResults: any[] = [];
       if (signalFile) {
-        const rawSignals = await parseCSV(signalFile);
+        const rawSignals = await localCsvParser(signalFile);
         // Force source to 'Signal' for map coloring
-        signalResults = rawSignals.map(s => ({ ...s, source: 'Signal', matched: true }));
+        signalResults = (rawSignals || []).map((s: any) => ({ ...s, source: 'Signal', matched: true }));
       }
 
-      // 3. Apply Logic (Caution Orders, Speed Checks)
-      const mps = Number(config.mps);
+      // 3. Apply Business Logic (Speed Checks)
+      const mps = Number(config.mps) || 110;
+      
       const processedResults = gpsResults.map((point: any) => {
         let status = 'ok';
         let limit = mps;
@@ -125,14 +144,16 @@ export default function DashboardPage() {
             status = 'violation';
         }
 
-        // Check Caution Orders (Simple Check)
-        // Note: Real logic needs to parse KM like '755/12', assuming generic matching here
+        // Check Caution Orders
         cautionOrders.forEach(co => {
              if(co.start && co.end && co.speed) {
-                 // Placeholder: If location string contains the start/end KM text
-                 if(point.location.includes(co.start) || point.location.includes(co.end)) {
-                     limit = Number(co.speed);
-                     if(point.speed_kmph > limit) status = 'violation';
+                 // Simple string matching for demo purposes
+                 if(point.location && (point.location.includes(co.start) || point.location.includes(co.end))) {
+                     const cautionLimit = Number(co.speed);
+                     if (!isNaN(cautionLimit)) {
+                        limit = cautionLimit;
+                        if(point.speed_kmph > limit) status = 'violation';
+                     }
                  }
              }
         });
@@ -140,7 +161,7 @@ export default function DashboardPage() {
         return { ...point, limit_applied: limit, status };
       });
 
-      // 4. Generate Summary
+      // 4. Generate Summary for Dashboard
       const violations = processedResults.filter((r: any) => r.status === 'violation');
       
       const data = {
@@ -217,6 +238,7 @@ export default function DashboardPage() {
                 <div className="grid grid-cols-1 gap-3">
                     <div className="space-y-1.5">
                         <Label className="text-xs text-slate-500">Departure Time</Label>
+                        {/* STEP="60" ENABLED HERE for Minutes */}
                         <Input type="datetime-local" step="60" value={config.departureTime} onChange={(e) => setConfig({...config, departureTime: e.target.value})} className="text-sm"/>
                     </div>
                     <div className="space-y-1.5">
@@ -264,6 +286,7 @@ export default function DashboardPage() {
             </div>
           </Card>
 
+          {/* Error Alert Box */}
           {error && (
             <Alert variant="destructive" className="bg-red-50 text-red-900 border-red-200">
                 <AlertTriangle className="h-4 w-4" />

@@ -134,8 +134,8 @@ export default function Home() {
 
   const handleRemoveCO = (index: number) => setCautionOrders(cautionOrders.filter((_, i) => i !== index));
 
-  // --- REVISED: ONE-TIME BRAKE TEST & HALT LOGIC ---
-  const analyzeHaltsAndBrakeTests = (data: any[], trainType: TrainType) => {
+  // --- REVISED LOGIC: Checks strictly AFTER Departure Time ---
+  const analyzeHaltsAndBrakeTests = (data: any[], trainType: TrainType, depTimeStr: string) => {
       const stoppages = [];
       const brakeTests = [];
       let stopStart: any = null;
@@ -148,18 +148,26 @@ export default function Home() {
       let bptFound = false;
       let bptPotentialStart: any = null;
       
-      // BPT Parameters based on Train Type
+      // BPT Parameters
       const bptMinSpeed = trainType === 'passenger' ? 60 : 40;
       const bptMaxSpeed = trainType === 'passenger' ? 70 : 50;
 
+      // Convert Departure Time to Timestamp for strict comparison
+      const departureTs = depTimeStr ? new Date(depTimeStr).getTime() : 0;
+
+      // Ensure data is sorted by time
       const sorted = [...data].sort((a,b) => new Date(a.logging_time).getTime() - new Date(b.logging_time).getTime());
 
       for (let i = 0; i < sorted.length; i++) {
           const point = sorted[i];
+          const pointTime = new Date(point.logging_time).getTime();
           const speed = point.speed_kmph;
 
-          // --- 1. Halt Detection (> 15 sec) ---
-          if (speed < 5) { // Relaxed stop threshold
+          // SKIP logic if point is BEFORE Departure Time
+          if (pointTime < departureTs) continue;
+
+          // --- 1. Halt Detection ---
+          if (speed < 5) { 
               if (!stopStart) stopStart = point;
           } else {
               if (stopStart) {
@@ -179,16 +187,14 @@ export default function Home() {
               }
           }
 
-          // --- 2. BFT Detection (First time 15kmph reached) ---
-          // Rule: Check only ONCE (first valid occurrence)
+          // --- 2. BFT Detection (First time 15kmph reached AFTER departure) ---
           if (!bftFound) {
               if (speed >= 15 && !bftPotentialStart) {
-                  // Reached 15kmph, start monitoring for drop
+                  // Reached 15kmph, start monitoring
                   bftPotentialStart = point; 
               } else if (bftPotentialStart) {
-                  // We have started, now look for drop to ~10kmph (e.g., drop > 4kmph)
+                  // Look for drop to ~10kmph (e.g., drop > 4kmph)
                   if (speed <= 11 && speed > 2) { 
-                      // Success: Speed dropped to near 10 kmph without stopping
                       brakeTests.push({
                           type: 'BFT',
                           status: 'proper',
@@ -197,23 +203,22 @@ export default function Home() {
                           location: bftPotentialStart.location || "Start Section",
                           timestamp: bftPotentialStart.logging_time
                       });
-                      bftFound = true; // Mark done
-                  } else if (speed > 20) {
-                      // Accelerated too much without testing, invalid start attempt
+                      bftFound = true; // Stop checking
+                  } else if (speed > 25) {
+                      // Accelerated too much (>25) without testing -> Missed opportunity or Invalid Start
                       bftPotentialStart = null; 
                   }
               }
           }
 
-          // --- 3. BPT Detection (First time target speed reached) ---
-          // Rule: Check only ONCE
+          // --- 3. BPT Detection (First time target speed reached AFTER departure) ---
           if (!bptFound) {
               if (speed >= bptMinSpeed && speed <= bptMaxSpeed && !bptPotentialStart) {
-                  // Entered target speed zone (e.g. 60-70 for Passenger)
+                  // Entered target speed zone
                   bptPotentialStart = point;
               } else if (bptPotentialStart) {
                   const drop = bptPotentialStart.speed_kmph - speed;
-                  // Rule: Speed should drop by ~20-30 kmph
+                  // Rule: Drop by ~20-30 kmph
                   if (drop >= 20) {
                        brakeTests.push({
                            type: 'BPT',
@@ -223,9 +228,9 @@ export default function Home() {
                            location: bptPotentialStart.location || "Block Section",
                            timestamp: bptPotentialStart.logging_time
                        });
-                       bptFound = true; // Mark done
+                       bptFound = true; // Stop checking
                   } else if (speed > bptMaxSpeed + 5) {
-                      // Speed increased instead of dropping, reset search
+                      // Speed kept increasing -> Reset
                       bptPotentialStart = null;
                   }
               }
@@ -246,6 +251,8 @@ export default function Home() {
         if (gpsData.length === 0) throw new Error("RTIS CSV empty.");
         
         let filteredGps = gpsData;
+        
+        // Strict Time Filtering
         if (departureTime && arrivalTime) {
             const start = new Date(departureTime).getTime();
             const end = new Date(arrivalTime).getTime();
@@ -257,8 +264,8 @@ export default function Home() {
             if (filteredGps.length === 0) throw new Error("Time filter removed all points.");
         }
 
-        // --- Calculate Halts & Brake Tests ---
-        const { stoppages, brakeTests } = analyzeHaltsAndBrakeTests(filteredGps, trainType);
+        // --- Calculate Halts & Brake Tests (Pass Departure Time) ---
+        const { stoppages, brakeTests } = analyzeHaltsAndBrakeTests(filteredGps, trainType, departureTime);
 
         // --- Reduce Data (One Point Per OHE) ---
         let finalDisplayData = [];
@@ -279,7 +286,7 @@ export default function Home() {
                     if (!existingBest || minD < existingBest.distanceToMast) {
                         oheMatches.set(nearestOhe.location, { 
                             ...gps, 
-                            location: nearestOhe.location, // Snap GPS name to Mast
+                            location: nearestOhe.location, 
                             matched: true,
                             distanceToMast: minD 
                         });
@@ -294,12 +301,11 @@ export default function Home() {
         // Sort by Time
         finalDisplayData.sort((a,b) => new Date(a.logging_time).getTime() - new Date(b.logging_time).getTime());
 
-        // --- Apply Limits (Caution Orders & Violations) ---
+        // --- Apply Limits ---
         finalDisplayData = finalDisplayData.map(point => {
             let limit = globalMPS;
             let status = 'ok';
 
-            // 1. Caution Order Logic (Range Based)
             for (const co of cautionOrders) {
                 if (point.location && co.startOhe && co.endOhe) {
                     if (isLocationInCautionRange(point.location, co.startOhe, co.endOhe)) {
@@ -308,7 +314,6 @@ export default function Home() {
                 }
             }
 
-            // 2. Violation Logic (MPS+4 Rule)
             const speed = point.speed_kmph;
             if (speed <= limit) status = 'ok';
             else if (speed < limit + 4) status = 'warning';

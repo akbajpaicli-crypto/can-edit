@@ -1,6 +1,6 @@
 import Papa from 'papaparse';
 
-// --- Types ---
+// --- Interfaces ---
 export interface CautionOrder {
   startOhe: string;
   endOhe: string;
@@ -68,7 +68,6 @@ export interface AnalysisSummary {
 }
 
 // --- Helpers ---
-
 function cleanCoord(val: any): number {
   if (typeof val === 'number') return val;
   if (!val) return NaN;
@@ -242,7 +241,6 @@ export async function analyzeData(
       }
   });
 
-  // Signal Grid for Stoppage Logic
   const signalGrid = new GridIndex(0.01);
   let signalDataList: Array<{lat: number, lon: number, name: string}> = [];
   if (signalsDataRaw.length > 0) {
@@ -385,7 +383,6 @@ export async function analyzeData(
 
   const finalResults = processDataset(masterDataRaw, isOheMaster ? 'OHE' : 'Signal', masterLatCol, masterLonCol, masterLabelCol);
   
-  // Signal History for Backtracking
   let signalResults: AnalysisResult[] = [];
   let signalHistory: AnalysisResult[] = [];
   if (isOheMaster && signalsDataRaw.length > 0) {
@@ -405,7 +402,7 @@ export async function analyzeData(
       ? rtisCleaned.filter(p => p.idx >= firstMatchedRtisIndex && p.idx <= lastMatchedRtisIndex)
       : [];
 
-  // --- STEP 7: BRAKE TESTS ---
+  // --- STEP 7: BRAKE TESTS (Strict Rules) ---
   const brakeTests: BrakeTestResult[] = [];
   if (validSectionData.length > 0) {
       const startLoc = validSectionData[0];
@@ -418,62 +415,65 @@ export async function analyzeData(
           brakeTests.push({ type: 'BPT', status: 'not_performed', startSpeed: entrySpeed, lowestSpeed: entrySpeed, dropAmount: 0, location: findNearestLocation(startLoc.lat, startLoc.lon), timestamp: startLoc.timeStr, details: detail });
       } else {
           
-          // --- BFT LOGIC (Strict 10-15 Window) ---
+          // --- BFT LOGIC ---
+          // Target: 15 kmph -> Drop to 10 kmph (Drop >= 5)
           let bftResult: BrakeTestResult | null = null;
           
           for (let i = 0; i < validSectionData.length - 1; i++) {
               const p = validSectionData[i];
-              
-              // Fail Condition: Exceeded 15kmph without passing test
               if (p.speed > 15) {
-                  bftResult = { type: 'BFT', status: 'improper', startSpeed: p.speed, lowestSpeed: p.speed, dropAmount: 0, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "Speed crossed 15kmph without valid test" };
+                  bftResult = { type: 'BFT', status: 'improper', startSpeed: p.speed, lowestSpeed: p.speed, dropAmount: 0, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "Crossed 15kmph without test" };
                   break; 
               }
-
-              // Test Window: 10 to 15
               if (p.speed >= 10 && p.speed <= 15) {
-                  // Look ahead 20 seconds for a 5kmph drop
                   let minSpeed = p.speed;
-                  let dropped = false;
                   for(let j = i; j < Math.min(i + 20, validSectionData.length); j++) {
                       if (validSectionData[j].speed < minSpeed) minSpeed = validSectionData[j].speed;
                       if (validSectionData[j].speed === 0) minSpeed = 0; 
                   }
-                  
                   if (p.speed - minSpeed >= 5) {
-                      bftResult = { type: 'BFT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "Drop >= 5 kmph observed" };
-                      break; // Success
+                      bftResult = { type: 'BFT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "Drop >= 5 kmph confirmed" };
+                      break; 
                   }
               }
           }
           if(bftResult) brakeTests.push(bftResult);
 
-
-          // --- BPT LOGIC (50% Drop from 60+) ---
+          // --- BPT LOGIC (Strict Rules) ---
           let bptResult: BrakeTestResult | null = null;
-          // Look for opportunity within first 15km
+          // Passenger: Speed 60-70 -> Drop 30-35 (Min Drop 30)
+          // Goods: Speed 40-50 -> Drop 20-25 (Min Drop 20)
+          
+          const BPT_MIN_START = trainType === 'passenger' ? 60 : 40;
+          const BPT_MAX_START = trainType === 'passenger' ? 70 : 50;
+          const BPT_REQ_DROP = trainType === 'passenger' ? 30 : 20;
+
           for (let i = 0; i < validSectionData.length - 1; i++) {
               const p = validSectionData[i];
-              if (haversineMeters(startLoc.lat, startLoc.lon, p.lat, p.lon) > 15000) break;
+              if (haversineMeters(startLoc.lat, startLoc.lon, p.lat, p.lon) > 15000) break; // First 15km only
 
-              if (p.speed >= 60) {
-                  // Check for 50% drop within 60s
+              if (p.speed >= BPT_MIN_START) {
                   let minSpeed = p.speed;
+                  // Look ahead 60 seconds
                   for(let j = i; j < Math.min(i + 60, validSectionData.length); j++) {
                       if (validSectionData[j].speed < minSpeed) minSpeed = validSectionData[j].speed;
                   }
                   
-                  if (minSpeed <= (p.speed * 0.5)) {
-                      bptResult = { type: 'BPT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: p.speed - minSpeed, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: "50% Drop observed" };
+                  const drop = p.speed - minSpeed;
+                  if (drop >= BPT_REQ_DROP) {
+                      bptResult = { type: 'BPT', status: 'proper', startSpeed: p.speed, lowestSpeed: minSpeed, dropAmount: drop, location: findNearestLocation(p.lat, p.lon), timestamp: p.timeStr, details: `Drop of ${drop} kmph achieved` };
                       break; 
                   }
               }
           }
-          // If no proper result found, check if we missed an opportunity
+          
           if (!bptResult) {
-              const opp = validSectionData.find(p => p.speed >= 60);
+              const opp = validSectionData.find(p => p.speed >= BPT_MIN_START);
               if (opp && haversineMeters(startLoc.lat, startLoc.lon, opp.lat, opp.lon) <= 15000) {
-                  brakeTests.push({ type: 'BPT', status: 'improper', startSpeed: opp.speed, lowestSpeed: opp.speed, dropAmount: 0, location: findNearestLocation(opp.lat, opp.lon), timestamp: opp.timeStr, details: "Reached 60+ kmph but no 50% drop detected" });
+                  brakeTests.push({ type: 'BPT', status: 'improper', startSpeed: opp.speed, lowestSpeed: opp.speed, dropAmount: 0, location: findNearestLocation(opp.lat, opp.lon), timestamp: opp.timeStr, details: `Reached ${BPT_MIN_START}+ kmph but insufficient drop` });
+              } else {
+                  // Didn't even reach speed
+                  brakeTests.push({ type: 'BPT', status: 'not_performed', startSpeed: 0, lowestSpeed: 0, dropAmount: 0, location: "-", timestamp: "-", details: `Did not reach ${BPT_MIN_START} kmph in first 15km` });
               }
           } else {
               brakeTests.push(bptResult);

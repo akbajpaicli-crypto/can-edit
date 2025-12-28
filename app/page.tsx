@@ -139,12 +139,12 @@ export default function Home() {
       const stoppages = [];
       const brakeTests = [];
       let stopStart: any = null;
-      
-      // BFT Logic: Track speed sequence (Drop > 5kmph then increase)
       let speedDropStart: any = null;
 
-      for (let i = 0; i < data.length; i++) {
-          const point = data[i];
+      const sorted = [...data].sort((a,b) => new Date(a.logging_time).getTime() - new Date(b.logging_time).getTime());
+
+      for (let i = 0; i < sorted.length; i++) {
+          const point = sorted[i];
           const speed = point.speed_kmph;
 
           // 1. Halt Detection (< 2kmph)
@@ -164,14 +164,13 @@ export default function Home() {
                           durationMin: Math.round(durationMin)
                       });
                       
-                      // Check for BPT (Brake Power Test) - Stop involves braking
-                      // Heuristic: If we stopped, check speed 60s ago. If it was high, likely a BPT.
+                      // BPT Check
                       brakeTests.push({
                           type: 'BPT',
-                          status: 'proper', // Assuming proper if stop achieved
+                          status: 'proper', 
                           testSpeed: 0,
                           finalSpeed: 0,
-                          location: stopStart.location || "Unknown",
+                          location: stopStart.location || `Near ${stopStart.latitude.toFixed(4)}`,
                           timestamp: stopStart.logging_time
                       });
                   }
@@ -179,18 +178,15 @@ export default function Home() {
               }
           }
 
-          // 2. BFT Detection (Running Test)
-          // Look for: Moving -> Speed drops by >5 -> Speed increases
+          // 2. BFT Detection
           if (i > 0) {
-              const prev = data[i-1];
-              if (prev.speed_kmph > 10 && speed < prev.speed_kmph) {
-                  // Speed decreasing
+              const prev = sorted[i-1];
+              if (prev.speed_kmph > 20 && speed < prev.speed_kmph) {
                   if (!speedDropStart) speedDropStart = prev;
               } 
               else if (speed > prev.speed_kmph && speedDropStart) {
-                   // Speed started increasing. Check magnitude of drop
                    const drop = speedDropStart.speed_kmph - prev.speed_kmph;
-                   if (drop > 8 && prev.speed_kmph > 0) { // Threshold 8 kmph drop
+                   if (drop > 8 && prev.speed_kmph > 10) {
                        brakeTests.push({
                            type: 'BFT',
                            status: 'proper',
@@ -204,7 +200,6 @@ export default function Home() {
               }
           }
       }
-
       return { stoppages, brakeTests };
   }
 
@@ -230,31 +225,33 @@ export default function Home() {
         if (departureTime && arrivalTime) {
             const start = new Date(departureTime).getTime();
             const end = new Date(arrivalTime).getTime();
+            
+            if (end <= start) {
+                throw new Error("End Time must be after Start Time. Please correct the dates.");
+            }
+
             filteredGps = gpsData.filter(p => {
                 const t = new Date(p.logging_time).getTime();
                 return t >= start && t <= end;
             });
-            if (filteredGps.length === 0) throw new Error("Time filter removed all points.");
+            if (filteredGps.length === 0) throw new Error("Time filter removed all points. Check your dates.");
         }
 
-        // --- 2. Calculate Halts & Brake Tests (On full time-series data) ---
+        // --- 2. Calculate Halts & Brake Tests (BEFORE reduction) ---
         const { stoppages, brakeTests } = analyzeHaltsAndBrakeTests(filteredGps);
 
         // --- 3. Match Logic (Strict: One Point Per OHE) ---
         setStatus({ type: "processing", message: "Matching to OHE Masts..." });
         
-        // Map to store best match for each OHE
-        const oheMatches = new Map<string, any>(); // Key: OHE Location, Value: Best GPS Point
-
         let finalDisplayData = [];
 
         if (oheData.length > 0) {
-            // A. Iterate GPS points and find nearest OHE
+            const oheMatches = new Map<string, any>(); 
+
             filteredGps.forEach(gps => {
                 let nearestOhe = null;
                 let minD = Infinity;
 
-                // Optimization: Loop OHE (Ideally use R-Tree for huge datasets, but loop OK for <10k)
                 for (const ohe of oheData) {
                     const d = getDistance(gps.latitude, gps.longitude, ohe.latitude, ohe.longitude);
                     if (d < minD && d <= maxDistance) {
@@ -263,14 +260,12 @@ export default function Home() {
                     }
                 }
 
-                // B. Keep ONLY the single closest GPS point for this specific OHE Mast
                 if (nearestOhe) {
                     const existingBest = oheMatches.get(nearestOhe.location);
-                    // If no point yet, OR this point is closer than the previous best
                     if (!existingBest || minD < existingBest.distanceToMast) {
                         oheMatches.set(nearestOhe.location, { 
                             ...gps, 
-                            location: nearestOhe.location, // Snap name to OHE
+                            location: nearestOhe.location, 
                             matched: true,
                             distanceToMast: minD 
                         });
@@ -278,36 +273,39 @@ export default function Home() {
                 }
             });
 
-            // C. Convert Map to Array (Sort by Time)
             finalDisplayData = Array.from(oheMatches.values()).sort((a,b) => 
                 new Date(a.logging_time).getTime() - new Date(b.logging_time).getTime()
             );
 
         } else {
-            // Fallback: If no OHE file uploaded, just use raw GPS
             finalDisplayData = filteredGps.map(p => ({...p, distanceToMast: 0, matched: false})); 
         }
 
-        // --- 4. Apply Limits & Violations on Final Data ---
+        // --- 4. NEW LOGIC: MPS+1..3=Warning, MPS+4=Violation ---
         finalDisplayData = finalDisplayData.map(point => {
             let limit = globalMPS;
             let status = 'ok';
 
-            // Caution Orders
+            // Caution Orders Override
             for (const co of cautionOrders) {
-                // Exact string match for start/end
                 if (point.location === co.startOhe || point.location === co.endOhe) {
                     limit = co.speedLimit;
                 }
             }
 
-            // Violation Check (Strictly Greater Than)
-            // 110 (Actual) > 110 (Limit) is FALSE -> OK
-            // 111 (Actual) > 110 (Limit) is TRUE -> Violation
-            if (point.speed_kmph > limit) {
-                status = 'violation';
-            } else if (point.speed_kmph > limit * 0.95 && point.speed_kmph <= limit) {
+            const speed = point.speed_kmph;
+
+            // --- STRICT LOGIC IMPLEMENTATION ---
+            if (speed <= limit) {
+                status = 'ok';
+            } else if (speed < limit + 4) {
+                // Means: Limit < Speed < Limit + 4
+                // e.g. Limit 110. Speed 111, 112, 113.
                 status = 'warning';
+            } else {
+                // Means: Speed >= Limit + 4
+                // e.g. Limit 110. Speed 114+.
+                status = 'violation';
             }
 
             return { ...point, limit_applied: limit, status, source: 'GPS' };
@@ -315,6 +313,7 @@ export default function Home() {
 
         const mapSignals = signalData.map(s => ({ ...s, source: 'Signal', matched: true, status: 'ok' }));
         const violations = finalDisplayData.filter(r => r.status === 'violation').length;
+        const warnings = finalDisplayData.filter(r => r.status === 'warning').length;
 
         setResults({
             results: finalDisplayData,
@@ -324,7 +323,7 @@ export default function Home() {
                 matched_structures: finalDisplayData.length,
                 match_rate: oheData.length > 0 ? (finalDisplayData.length / oheData.length) * 100 : 0,
                 violation_count: violations,
-                warning_count: 0,
+                warning_count: warnings,
                 config_mps: globalMPS,
                 brake_tests: brakeTests,
                 stoppages: stoppages,
@@ -332,7 +331,7 @@ export default function Home() {
             }
         });
 
-        setStatus({ type: "success", message: `Analysis Complete. Showing ${finalDisplayData.length} data points.` });
+        setStatus({ type: "success", message: `Analysis Complete. Matched ${finalDisplayData.length} unique OHE points.` });
 
     } catch (e: any) {
         console.error(e);

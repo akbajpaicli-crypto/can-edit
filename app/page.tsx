@@ -156,15 +156,17 @@ export default function Home() {
                   const endTime = new Date(point.logging_time);
                   const durationMin = (endTime.getTime() - startTime.getTime()) / 60000;
                   
-                  if (durationMin > 1) { // Min 1 min to be a halt
+                  // UPDATED LOGIC: > 15 seconds (0.25 minutes)
+                  if (durationMin > 0.25) { 
                       stoppages.push({
                           location: stopStart.location || `GPS Near ${stopStart.latitude.toFixed(4)}`,
                           arrivalTime: stopStart.logging_time,
                           departureTime: point.logging_time,
-                          durationMin: Math.round(durationMin)
+                          // Use toFixed(1) to show decimal minutes for short stops (e.g. 0.5 min)
+                          durationMin: Number(durationMin.toFixed(1))
                       });
                       
-                      // BPT Check
+                      // BPT Check: If stopped for > 0.25 min, likely a stop/start event
                       brakeTests.push({
                           type: 'BPT',
                           status: 'proper', 
@@ -295,16 +297,11 @@ export default function Home() {
 
             const speed = point.speed_kmph;
 
-            // --- STRICT LOGIC IMPLEMENTATION ---
             if (speed <= limit) {
                 status = 'ok';
             } else if (speed < limit + 4) {
-                // Means: Limit < Speed < Limit + 4
-                // e.g. Limit 110. Speed 111, 112, 113.
                 status = 'warning';
             } else {
-                // Means: Speed >= Limit + 4
-                // e.g. Limit 110. Speed 114+.
                 status = 'violation';
             }
 

@@ -1,9 +1,8 @@
 "use client"
 
 import type React from "react"
-
 import { useState } from "react"
-import { Upload, MapPin, Radio, AlertTriangle, Trash2, Plus, TrainFront, Truck } from "lucide-react"
+import { Upload, MapPin, AlertTriangle, Trash2, Plus, TrainFront, Truck } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -18,6 +17,8 @@ export default function Home() {
   const [signalsFile, setSignalsFile] = useState<File | null>(null)
   
   // Analysis Parameters
+  const [departureTime, setDepartureTime] = useState<string>("")
+  const [arrivalTime, setArrivalTime] = useState<string>("")
   const [maxDistance, setMaxDistance] = useState<number>(50)
   const [globalMPS, setGlobalMPS] = useState<number>(110)
   const [trainType, setTrainType] = useState<TrainType>('passenger')
@@ -74,7 +75,24 @@ export default function Home() {
     setStatus({ type: "processing", message: "Processing..." })
 
     try {
-      const data = await analyzeData(rtisFile, oheFile, signalsFile, maxDistance, globalMPS, cautionOrders, trainType)
+      // NOTE: Ensure your analyzeData function in lib/analyzer.ts accepts this config object/arguments
+      // We pass departure/arrival times here if your analyzer supports filtering by time.
+      const config = {
+          departureTime,
+          arrivalTime
+      };
+
+      const data = await analyzeData(
+          rtisFile, 
+          oheFile, 
+          signalsFile, 
+          maxDistance, 
+          globalMPS, 
+          cautionOrders, 
+          trainType,
+          config // Passing time config as 8th argument (Optional check)
+      )
+      
       setResults(data)
       setStatus({ type: "success", message: `Success! Processed ${data.summary.total_structures} locations.` })
     } catch (error) {
@@ -95,7 +113,7 @@ export default function Home() {
         <div className="container mx-auto px-4 py-3">
           <div className="flex items-center gap-4">
             
-            {/* LOGO: Hidden automatically if file not found */}
+            {/* LOGO */}
             <div className="flex-shrink-0">
                <img 
                  src="/railway-logo.jpeg" 
@@ -107,7 +125,7 @@ export default function Home() {
                />
             </div>
 
-            {/* Title Text (Thunder Icon Removed) */}
+            {/* Title */}
             <div>
                 <h1 className="text-2xl font-bold text-foreground leading-tight tracking-tight">Railway Geo-Analytics Platform</h1>
                 <p className="text-xs text-muted-foreground font-medium uppercase tracking-wide">West Central Railway • Jabalpur Division</p>
@@ -147,6 +165,30 @@ export default function Home() {
                 <div className="space-y-4 border-b pb-4">
                   <h3 className="font-semibold text-sm">Configuration</h3>
                   
+                  {/* --- NEW: Departure & Arrival Time Inputs with Minutes (step="60") --- */}
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-1">
+                      <Label className="text-xs">Departure Time</Label>
+                      <Input 
+                        type="datetime-local" 
+                        step="60" // Enables minute selection
+                        value={departureTime} 
+                        onChange={(e) => setDepartureTime(e.target.value)} 
+                        className="text-xs"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-xs">Arrival Time</Label>
+                      <Input 
+                        type="datetime-local" 
+                        step="60" // Enables minute selection
+                        value={arrivalTime} 
+                        onChange={(e) => setArrivalTime(e.target.value)} 
+                        className="text-xs"
+                      />
+                    </div>
+                  </div>
+
                   <div className="space-y-2">
                     <Label className="text-xs">Train Type</Label>
                     <div className="grid grid-cols-2 gap-2">

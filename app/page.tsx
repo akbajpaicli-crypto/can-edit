@@ -1,7 +1,7 @@
 "use client"
 
 import { useState } from "react"
-import { Upload, Calendar, AlertTriangle, Play, Plus, Trash2, Train, Truck, Info } from "lucide-react"
+import { Upload, Calendar, AlertTriangle, Play, Plus, Trash2, Train, Truck, Info, Download } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Input } from "@/components/ui/input"
@@ -17,15 +17,15 @@ interface CautionOrder {
   speed: string;
 }
 
-// --- ROBUST LOCAL PARSER (Renamed to ensure you use this one) ---
-// This function manually handles CSVs to prevent 'reading lat' errors
-const localCsvParser = async (file: File) => {
+// --- 1. ROBUST LOCAL PARSER (Safe from 'reading lat' errors) ---
+// We renamed this to 'processFileSafely' to ensure you are using the new logic.
+const processFileSafely = async (file: File) => {
   try {
     const text = await file.text();
-    // Split by new line and remove empty rows
-    const lines = text.split(/\r?\n/).filter(line => line.trim() !== ""); 
+    // Split by new line and remove strictly empty rows
+    const lines = text.split(/\r?\n/).filter(line => line && line.trim().length > 0);
     
-    if (lines.length < 2) return []; // Need header + 1 row
+    if (lines.length < 2) return []; // Need at least header + 1 data row
 
     // Normalize headers to lowercase to find columns easily
     const headers = lines[0].toLowerCase().split(",").map(h => h.trim());
@@ -45,22 +45,24 @@ const localCsvParser = async (file: File) => {
     return lines.slice(1).map((line, index) => {
       const cols = line.split(",");
       
-      // Skip if row is too short
+      // Skip if row is too short (malformed CSV line)
       if (cols.length < 2) return null;
 
       // Safe number parsing
-      const lat = parseFloat(cols[latIdx]);
-      const lng = parseFloat(cols[lngIdx]);
+      const latVal = latIdx !== -1 ? parseFloat(cols[latIdx]) : NaN;
+      const lngVal = lngIdx !== -1 ? parseFloat(cols[lngIdx]) : NaN;
 
-      // CRITICAL SAFETY CHECK: Skip invalid coordinates to prevent crashes later
-      if (isNaN(lat) || isNaN(lng)) {
+      // CRITICAL SAFETY CHECK: 
+      // If latitude is missing or invalid, skip this row entirely.
+      // This prevents the "reading 'lat'" crash later on.
+      if (isNaN(latVal) || isNaN(lngVal)) {
         return null;
       }
 
       return {
-        location: cols[locIdx] || `Point ${index + 1}`,
-        latitude: lat,
-        longitude: lng,
+        location: (locIdx !== -1 && cols[locIdx]) ? cols[locIdx] : `Point ${index + 1}`,
+        latitude: latVal,
+        longitude: lngVal,
         speed_kmph: speedIdx !== -1 ? (parseFloat(cols[speedIdx]) || 0) : 0,
         logging_time: timeIdx !== -1 ? cols[timeIdx] : new Date().toISOString(),
         source: typeIdx !== -1 ? cols[typeIdx] : 'GPS',
@@ -108,7 +110,7 @@ export default function DashboardPage() {
     setCautionOrders(cautionOrders.map(c => c.id === id ? { ...c, [field]: value } : c))
   }
 
-  // --- MAIN ANALYSIS FUNCTION ---
+  // --- 2. FIXED ANALYSIS HANDLER ---
   const handleAnalysis = async () => {
     setError(null)
     setIsAnalyzing(true)
@@ -117,24 +119,26 @@ export default function DashboardPage() {
     try {
       if (!gpsFile) throw new Error("Please upload a GPS CSV file to begin.")
 
-      // 1. Parse GPS Data using LOCAL parser (Do not use external 'analyzeData')
-      const gpsResults = await localCsvParser(gpsFile);
+      // STEP A: Use the SAFE parser (not 'analyzeData' or 'mockAnalyzeData')
+      console.log("Starting CSV parse...");
+      const gpsResults = await processFileSafely(gpsFile);
       
       if (!gpsResults || gpsResults.length === 0) {
-        throw new Error("GPS File is empty, formatted incorrectly, or contains no valid coordinates.");
+        throw new Error("GPS File contains no valid coordinates (Latitude/Longitude columns missing or empty).");
       }
 
-      // 2. Parse Signal Data (Optional)
+      // STEP B: Parse Signal Data (Optional)
       let signalResults: any[] = [];
       if (signalFile) {
-        const rawSignals = await localCsvParser(signalFile);
-        // Force source to 'Signal' for map coloring
+        const rawSignals = await processFileSafely(signalFile);
+        // Force source to 'Signal' so they appear blue/distinct on map
         signalResults = (rawSignals || []).map((s: any) => ({ ...s, source: 'Signal', matched: true }));
       }
 
-      // 3. Apply Business Logic (Speed Checks)
+      // STEP C: Apply Logic (Speed Checks)
       const mps = Number(config.mps) || 110;
       
+      // We map over results to add 'limit_applied' and 'status'
       const processedResults = gpsResults.map((point: any) => {
         let status = 'ok';
         let limit = mps;
@@ -147,7 +151,7 @@ export default function DashboardPage() {
         // Check Caution Orders
         cautionOrders.forEach(co => {
              if(co.start && co.end && co.speed) {
-                 // Simple string matching for demo purposes
+                 // Check if point location string matches start/end of caution order
                  if(point.location && (point.location.includes(co.start) || point.location.includes(co.end))) {
                      const cautionLimit = Number(co.speed);
                      if (!isNaN(cautionLimit)) {
@@ -161,7 +165,7 @@ export default function DashboardPage() {
         return { ...point, limit_applied: limit, status };
       });
 
-      // 4. Generate Summary for Dashboard
+      // STEP D: Prepare Final Data Object
       const violations = processedResults.filter((r: any) => r.status === 'violation');
       
       const data = {
@@ -179,11 +183,12 @@ export default function DashboardPage() {
         }
       };
 
+      console.log("Analysis complete. Setting data.");
       setAnalysisData(data);
 
     } catch (err: any) {
-      console.error("Analysis Error:", err)
-      setError(err.message || "An unexpected error occurred during analysis.")
+      console.error("Analysis Crashed:", err)
+      setError(err.message || "An unexpected error occurred. Check console for details.")
     } finally {
       setIsAnalyzing(false)
     }
@@ -238,7 +243,6 @@ export default function DashboardPage() {
                 <div className="grid grid-cols-1 gap-3">
                     <div className="space-y-1.5">
                         <Label className="text-xs text-slate-500">Departure Time</Label>
-                        {/* STEP="60" ENABLED HERE for Minutes */}
                         <Input type="datetime-local" step="60" value={config.departureTime} onChange={(e) => setConfig({...config, departureTime: e.target.value})} className="text-sm"/>
                     </div>
                     <div className="space-y-1.5">
@@ -286,7 +290,6 @@ export default function DashboardPage() {
             </div>
           </Card>
 
-          {/* Error Alert Box */}
           {error && (
             <Alert variant="destructive" className="bg-red-50 text-red-900 border-red-200">
                 <AlertTriangle className="h-4 w-4" />
